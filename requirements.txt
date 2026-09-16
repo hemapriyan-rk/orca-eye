@@ -1,0 +1,53 @@
+# ORCA EYE — Python Dependencies
+# Research Prototype — Baseline Assistive Vision Navigation System
+# Target: Python 3.10+, NVIDIA RTX 4050 (CUDA 11.8+)
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# For CUDA-accelerated PyTorch, install first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# ---------------------------------------------------------------------------
+
+# Core deep learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLO object detection
+ultralytics>=8.0.0
+
+# Computer vision
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# Numerical computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# MiDaS depth model backbone (timm used by torch.hub MiDaS)
+timm>=0.9.0
+
+# Configuration
+pyyaml>=6.0
+
+# Data processing and logging
+pandas>=2.0.0
+pyarrow>=12.0.0       # Parquet support (optional but included)
+
+# Visualization & analysis
+matplotlib>=3.7.0
+Pillow>=9.5.0
+
+# Optional: offline text-to-speech
+pyttsx3>=2.90
+
+# Optional: system resource monitoring
+psutil>=5.9.0
+
+# Testing
+pytest>=7.3.0
+pytest-cov>=4.0.0
+
+# Development utilities
+tqdm>=4.65.0
+colorama>=0.4.6

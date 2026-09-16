@@ -1,0 +1,295 @@
+# =============================================================================
+# ORCA EYE — Master Configuration
+# RESEARCH PROTOTYPE — NOT FOR REAL-WORLD MOBILITY USE
+# =============================================================================
+# All tunable parameters are defined here.
+# Do NOT hard-code numeric values in source modules.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Camera / Video Source
+# -----------------------------------------------------------------------------
+camera:
+  # Test video file:  "D:/orca/videos/WhatsApp Video 2026-09-16 at 7.37.26 PM.mp4"
+  # Wi-Fi IP Webcam:  "http://10.234.182.115:8080/video"
+  # Local webcam:     0
+  source: "D:/orca/videos/WhatsApp Video 2026-09-16 at 7.37.26 PM.mp4"
+  width: 640
+  height: 480
+  fps_target: 30
+  reconnect_attempts: 5
+  reconnect_delay_s: 1.0
+
+# -----------------------------------------------------------------------------
+# YOLO Object Detection
+# -----------------------------------------------------------------------------
+detection:
+  model: "yolov8n.pt"         # nano variant for speed
+  confidence_threshold: 0.40
+  nms_threshold: 0.45
+  device: "cuda"
+  half: true                  # FP16 — ~2x throughput on RTX
+  imgsz: 320                  # 320 is ~4x faster than 640, minimal accuracy loss for navigation
+  torch_compile: false        # set true on PyTorch 2.x for extra ~15% (first run slow)
+  # COCO class IDs to detect (0=person, 1=bicycle, 2=car, 3=motorcycle,
+  # 5=bus, 7=truck, 13=bench, 56=chair, 57=dining table, 58=potted plant,
+  # 60=dining table, 63=laptop — add/remove freely)
+  target_classes:
+    - 0    # person
+    - 1    # bicycle
+    - 2    # car
+    - 3    # motorcycle
+    - 5    # bus
+    - 7    # truck
+    - 8    # boat
+    - 11   # stop sign
+    - 13   # bench
+    - 56   # chair
+    - 57   # dining table
+    - 58   # potted plant
+    - 60   # dining table (duplicate intentional — alias)
+    - 63   # laptop
+    - 67   # cell phone
+    - 72   # tv
+    - 73   # laptop
+    - 77   # teddy bear (test object)
+  low_confidence_threshold: 0.25  # below this → detection considered unreliable
+  # Phase 1: Class-specific confidence thresholds
+  class_confidence_thresholds:
+    0: 0.38   # person
+    1: 0.35   # bicycle
+    2: 0.45   # car
+    56: 0.35  # chair
+    57: 0.35  # dining table
+  # Phase 1: Box size bounds (filters out micro-noise and full-screen glitches)
+  min_box_dim: 12
+  max_box_dim: 640
+  # Phase 1: Temporal confirmation & persistence
+  confirmation_frames: 2     # frames before NEW becomes CONFIRMED
+  persistence_frames: 3      # frames to retain tentative detection without drop
+  duplicate_iou_threshold: 0.70  # suppress overlapping duplicate bounding boxes
+
+# -----------------------------------------------------------------------------
+# Temporal Tracking
+# -----------------------------------------------------------------------------
+tracking:
+  max_disappeared: 10         # frames before a track is dropped
+  max_distance: 150           # max pixel distance for centroid matching
+  iou_weight: 0.6             # weight of IoU vs centroid distance in matching
+  centroid_weight: 0.4
+  velocity_alpha: 0.3         # EMA alpha for velocity smoothing
+  min_track_age: 2            # frames before a track is considered stable
+  # Phase 1: Advanced tracking & motion classification
+  history_window: 5           # frames for smoothed velocity regression
+  stationary_velocity_thresh: 1.5   # px/frame below which object is stationary
+  approaching_area_rate_thresh: 0.04 # relative area expansion rate for approaching objects
+  crossing_ratio_thresh: 2.0  # |vx| / |vy| ratio to classify as laterally crossing
+
+# -----------------------------------------------------------------------------
+# Monocular Depth Estimation
+# -----------------------------------------------------------------------------
+depth:
+  model: "MiDaS_small"
+  input_size: 256             # reduced from 384 — faster, sufficient for nav
+  device: "cuda"
+  half: true
+  normalize: true
+  enabled: true
+  skip_frames: 3              # run MiDaS every Nth frame (depth changes slowly)
+  # Phase 1: Object ROI robust depth extraction
+  roi_inner_ratio: 0.60       # sample inner 60% of bbox (avoids background contamination)
+  outlier_percentile_low: 10  # reject lowest 10% depth values
+  outlier_percentile_high: 90 # reject highest 10% depth values
+
+# -----------------------------------------------------------------------------
+# Free-Space Estimation (Hybrid Option C)
+# -----------------------------------------------------------------------------
+freespace:
+  # Geometric prior: bottom fraction of image considered walkable by default
+  walkable_bottom_fraction: 0.55
+  # Obstacle box inflation factor (bbox expanded by this ratio before masking)
+  obstacle_inflation: 1.05
+  # Depth gradient threshold: pixels with grad > threshold marked OBSTACLE
+  depth_gradient_threshold: 0.08
+  # Near-depth threshold: if normalized depth < this → likely obstacle
+  near_depth_threshold: 0.30
+  # Minimum free probability to classify cell as FREE (vs UNKNOWN)
+  free_probability_threshold: 0.55
+  # Labels
+  labels:
+    FREE: 0
+    OBSTACLE: 1
+    UNKNOWN: 2
+
+# -----------------------------------------------------------------------------
+# Spatial Navigation Map
+# -----------------------------------------------------------------------------
+spatial_map:
+  grid_rows: 12
+  grid_cols: 20
+  # Occupancy decay per frame (for temporal smoothing)
+  occupancy_decay: 0.85
+  # Uncertainty boost per frame of no new data
+  uncertainty_growth: 0.05
+
+# -----------------------------------------------------------------------------
+# Candidate Path Generation
+# -----------------------------------------------------------------------------
+path_generation:
+  # Candidate directions: angle offsets in degrees from straight ahead
+  # (negative = left, positive = right)
+  candidate_angles_deg:
+    - -30.0   # LEFT
+    - -15.0   # SLIGHT_LEFT
+    -  0.0    # STRAIGHT
+    - 15.0    # SLIGHT_RIGHT
+    - 30.0    # RIGHT
+  # Path arc sample points (number of grid steps along each trajectory)
+  path_depth: 8
+  # Minimum corridor width in grid cells to be considered viable
+  min_corridor_width: 2
+  # STOP candidate always included regardless of scene
+  include_stop: true
+
+# -----------------------------------------------------------------------------
+# Path Scoring Weights
+# Score(P) = w_c*C + w_f*F + w_p*P - w_r*R - w_u*U
+# All weights should sum appropriately; tune experimentally.
+# -----------------------------------------------------------------------------
+scoring:
+  w_c: 0.30   # clearance weight
+  w_f: 0.25   # free-space weight
+  w_p: 0.25   # forward-progress weight
+  w_r: 0.15   # collision-risk penalty weight
+  w_u: 0.05   # uncertainty penalty weight
+  w_d: 0.20   # dynamic-object conflict penalty weight
+  # STOP path base score (it always scores this, representing "safe but zero progress")
+  stop_base_score: 0.10
+
+# -----------------------------------------------------------------------------
+# Dynamic Object Conflict Reasoning (Phase 1)
+# -----------------------------------------------------------------------------
+dynamic_conflict:
+  enabled: true
+  time_horizon_s: 2.5         # seconds to project dynamic object forward
+  conflict_distance_threshold: 45.0  # pixels distance to flag corridor conflict
+  min_conflict_confidence: 0.40      # minimum tracking/motion confidence required
+
+# -----------------------------------------------------------------------------
+# Safety & Decision Thresholds
+# -----------------------------------------------------------------------------
+safety:
+  # Minimum score for a path to be considered GO (else STOP)
+  min_go_score: 0.35
+  # Minimum clearance (fraction of path width) to allow GO
+  min_clearance: 0.20
+  # Max uncertainty fraction before issuing CAUTION
+  max_uncertainty: 0.65
+  # Hysteresis: current path must be beaten by this margin to switch directions
+  direction_hysteresis: 0.08
+  # Stability window: frames used to detect oscillation
+  stability_window: 10
+  # Max direction changes per stability_window before flagging oscillation
+  max_direction_changes: 4
+
+# -----------------------------------------------------------------------------
+# Navigation Commands
+# -----------------------------------------------------------------------------
+commands:
+  - LEFT
+  - SLIGHT_LEFT
+  - STRAIGHT
+  - SLIGHT_RIGHT
+  - RIGHT
+  - STOP
+  - CAUTION
+
+# -----------------------------------------------------------------------------
+# Visualization
+# -----------------------------------------------------------------------------
+visualization:
+  window_name: "ORCA EYE - Research Prototype"
+  layout: "auto"              # "auto" (1x4 for portrait, 2x2 for landscape), "horizontal", or "grid"
+  show_depth: true
+  show_freespace: true
+  show_grid: true
+  show_paths: true
+  show_metrics: true
+  # Colors (BGR)
+  colors:
+    free: [0, 200, 0]
+    obstacle: [0, 0, 220]
+    unknown: [0, 165, 255]
+    selected_path: [0, 255, 255]
+    candidate_path: [100, 100, 100]
+    bbox: [0, 255, 0]
+    track_id: [255, 165, 0]
+    warning: [0, 0, 255]
+    caution: [0, 165, 255]
+    safe: [0, 200, 0]
+  # Overlay alpha for free-space mask
+  freespace_alpha: 0.40
+  grid_alpha: 0.30
+  font_scale: 0.55
+  fps_display: true
+  tts_enabled: false          # set true to enable pyttsx3 audio
+
+# -----------------------------------------------------------------------------
+# Audio Instruction Generation (Phase 1)
+# -----------------------------------------------------------------------------
+audio:
+  enabled: false              # set true to enable pyttsx3 speech
+  cooldown_seconds: 2.5       # min seconds between non-emergency instructions
+  reminder_seconds: 8.0       # repeat current recommendation if unchanged
+  speech_rate: 155            # words per minute
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  log_dir: "logs"
+  failure_dir: "failure_cases"
+  per_frame_jsonl: true
+  metrics_csv: true
+  save_frames: false          # save every frame as JPEG (disk-heavy; off by default)
+  flush_interval: 50          # flush log buffer every N frames
+  max_log_size_mb: 500        # rotate log after this size
+
+# -----------------------------------------------------------------------------
+# Failure Detection Thresholds
+# -----------------------------------------------------------------------------
+failure_detection:
+  # Low clearance threshold (fraction)
+  low_clearance_threshold: 0.15
+  # Low confidence threshold for detection reliability
+  low_detection_confidence: 0.30
+  # High uncertainty threshold for free-space instability
+  high_uncertainty_threshold: 0.60
+  # Depth inconsistency: max frame-to-frame normalized depth change
+  depth_inconsistency_threshold: 0.25
+  # Rapid path change: direction changes within this many frames
+  rapid_change_window: 5
+  # Unknown region dominance threshold (fraction of grid cells)
+  unknown_dominance_threshold: 0.55
+  # Save JPEG snapshot of flagged frames
+  save_snapshots: true
+
+# -----------------------------------------------------------------------------
+# Performance Profiling
+# -----------------------------------------------------------------------------
+performance:
+  profile_enabled: true
+  # Log GPU/CPU/RAM stats every N frames
+  resource_log_interval: 30
+  # PyTorch global settings
+  cudnn_benchmark: true       # auto-tune conv kernels for fixed input sizes
+  cudnn_deterministic: false  # allow non-deterministic ops for speed
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+evaluation:
+  scenarios_dir: "data/scenarios"
+  results_dir: "logs/scenarios"
+  # Ground-truth annotation format (future; placeholder)
+  gt_format: "none"
