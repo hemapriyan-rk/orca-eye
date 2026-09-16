@@ -23,6 +23,7 @@ Usage
 
 import argparse
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -190,12 +191,18 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     from perception.tracker   import CentroidTracker
     from perception.depth     import DepthEstimator
     from perception.freespace import FreeSpaceEstimator
+    from perception.calibration import CameraCalibration
     from navigation.spatial_map    import SpatialMap
     from navigation.path_generator import PathGenerator
     from navigation.path_scorer    import PathScorer
     from navigation.decision       import DecisionMaker
     from navigation.spatial_entity import create_spatial_entities
     from navigation.dynamic_conflict import DynamicConflictEngine
+    from navigation.geometry       import EntityKinematics, calculate_bearing
+    from navigation.critical_region import CriticalRegionExtractor
+    from navigation.rho_fov        import RhoFOVPredictor
+    from navigation.camera_support import PerceptualSupportGate
+    from navigation.camera_responsibility import CameraResponsibilityManager
     from navigation.audio_guidance import InstructionGenerator
     from visualization.renderer    import Renderer
     from system_logging.logger     import SystemLogger
@@ -203,7 +210,7 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     from evaluation.metrics        import MetricsCollector
 
     logger.info("=" * 60)
-    logger.info("ORCA EYE — Baseline Assistive Vision Navigation System")
+    logger.info("ORCA EYE — Stage A: Single-Camera Perceptual Support Pipeline")
     logger.info("RESEARCH PROTOTYPE — NOT FOR REAL-WORLD MOBILITY USE")
     logger.info("=" * 60)
 
@@ -211,6 +218,12 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     camera  = CameraSource(source, cfg.get("camera", {}))
     W, H    = camera.get_resolution()
     logger.info("Camera: %dx%d", W, H)
+
+    # Stage A: Physical Calibration & Geometry
+    cam_cfg = cfg.get("camera", {})
+    hfov_val = float(cam_cfg.get("hfov_deg", 65.0))
+    camera_calib = CameraCalibration.from_fov(frame_width=W, frame_height=H, hfov_deg=hfov_val)
+    logger.info("Calibrated Camera: %dx%d, HFOV=%.1f deg, fx=%.1f", W, H, camera_calib.hfov_deg, camera_calib.fx)
 
     detector                = YOLODetector(cfg.get("detection", {}))
     tracker                 = CentroidTracker(cfg.get("tracking", {}))
@@ -223,6 +236,13 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     decision_maker          = DecisionMaker(cfg.get("safety", {}))
     audio_guidance          = InstructionGenerator(cfg)
     renderer                = Renderer(cfg, W, H)
+
+    # Stage A: Research Navigation-Coupled Perceptual Support
+    critical_extractor      = CriticalRegionExtractor(corridor_width_m=1.0, horizon_s=2.0, user_walk_speed_m_s=1.0)
+    rho_predictor           = RhoFOVPredictor(half_hfov_rad=camera_calib.half_hfov_rad, q_min=0.20, sigma_br=0.60, num_samples=50, horizon_s=2.0)
+    support_gate            = PerceptualSupportGate(tau_safe=0.35, tau_cam=0.40)
+    camera_manager          = CameraResponsibilityManager(primary_camera_id="PRIMARY_CAM")
+    entity_kinematics_map   = {}  # track_id -> EntityKinematics
 
     session_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
     sys_logger  = SystemLogger(cfg, session_id=session_id)
@@ -306,15 +326,66 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
             # ── Stage 7: Path scoring (with dynamic conflict penalties) ─
             candidates = scorer.score(candidates)
 
-            # ── Stage 8: Decision (NavigationState) ───────────────────
-            decision   = decision_maker.decide(
+            # ── Stage 7b: Stage A Perceptual Support & Admissibility ──────
+            now_ts = time.time()
+            rho_predictions = {}
+            for entity in spatial_entities:
+                tid = entity.track_id
+                # Derive metric egocentric ground coords (meters)
+                dist_m = max(0.5, float(getattr(entity, "relative_distance", 0.5)) * 6.0)
+                b_rad = math.radians(float(getattr(entity, "relative_bearing", 0.0)))
+                gx = dist_m * math.sin(b_rad)
+                gy = dist_m * math.cos(b_rad)
+
+                if tid not in entity_kinematics_map:
+                    kin = EntityKinematics(
+                        track_id=tid, timestamp=now_ts, x=gx, y=gy, bearing_rad=b_rad
+                    )
+                    entity_kinematics_map[tid] = kin
+                else:
+                    kin = entity_kinematics_map[tid]
+                    kin.update(
+                        new_timestamp=now_ts, new_x=gx, new_y=gy,
+                        half_hfov_rad=camera_calib.half_hfov_rad,
+                    )
+
+                pred = rho_predictor.predict_survival(
+                    entity_id=tid,
+                    bearing_rad=kin.bearing_rad,
+                    bearing_rate=kin.bearing_rate,
+                    camera_id="PRIMARY",
+                    current_time=now_ts,
+                )
+                rho_predictions[tid] = pred
+
+            # Extract Navigation-Critical Region S(G_k) & Critical Entities E_k
+            critical_regions = critical_extractor.extract_critical_regions(
+                candidates=candidates, spatial_entities=spatial_entities
+            )
+
+            # Evaluate Perceptual Support & Corridor Admissibility
+            corridor_support = support_gate.evaluate_corridors(
+                candidates=candidates,
+                critical_regions=critical_regions,
+                rho_predictions=rho_predictions,
+            )
+
+            # ── Stage 8: Decision (NavigationState with Admissibility Gate) ───
+            decision = decision_maker.decide(
                 candidates,
                 frame_id=frame_id,
                 spatial_entities=spatial_entities,
                 dynamic_conflicts=active_conflicts,
                 wall_proximity=wall_proximity,
+                corridor_support=corridor_support,
+                primary_camera_id="PRIMARY_CAM",
             )
-            stability  = decision_maker.get_stability_metrics()
+            camera_manager.update_responsibilities(
+                selected_corridor=decision.selected_path_direction,
+                critical_entities=decision.critical_entities,
+                support_score=decision.camera_support,
+            )
+            stability = decision_maker.get_stability_metrics()
 
             # ── Stage 8b: Audio guidance generation ───────────────────
             audio_instr = audio_guidance.generate_instruction(
@@ -359,6 +430,10 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
                 extra={
                     "dynamic_conflicts": len(active_conflicts),
                     "audio_instruction": audio_instr.text if audio_instr else None,
+                    "critical_entities": decision.critical_entities,
+                    "camera_support": round(decision.camera_support, 4),
+                    "admissibility_status": decision.admissibility_status,
+                    "responsible_camera": decision.responsible_camera,
                 },
             )
 

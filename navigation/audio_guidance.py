@@ -59,13 +59,13 @@ class InstructionGenerator:
     """
 
     PHRASES = {
-        "STRAIGHT": "Path is clear, continue straight.",
+        "STRAIGHT": "Continue straight.",
         "SLIGHT_LEFT": "Bear slightly left.",
         "SLIGHT_RIGHT": "Bear slightly right.",
         "LEFT": "Turn left.",
         "RIGHT": "Turn right.",
-        "CAUTION": "Caution, slow down.",
-        "STOP": "Stop! Obstacle ahead.",
+        "CAUTION": "Caution.",
+        "STOP": "Stop.",
     }
 
     def __init__(self, cfg: dict) -> None:

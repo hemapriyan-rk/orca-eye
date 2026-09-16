@@ -40,6 +40,7 @@ class NavigationReason:
     LOW_CLEARANCE = "LOW_CLEARANCE"
     HIGH_UNCERTAINTY = "HIGH_UNCERTAINTY"
     CORRIDOR_BLOCKED = "CORRIDOR_BLOCKED"
+    LOW_PERCEPTUAL_SUPPORT = "LOW_PERCEPTUAL_SUPPORT"
     HYSTERESIS_HOLD = "HYSTERESIS_HOLD"
     NO_CANDIDATES = "NO_CANDIDATES"
 
@@ -78,6 +79,16 @@ class NavigationState:
     is_caution: bool = False
     timestamp: float = field(default_factory=time.time)
     frame_id: int = 0
+
+    # Stage A: Single-Camera Scientific Validation & Perceptual Support Hierarchy
+    critical_entities: List[int] = field(default_factory=list)      # E_k
+    camera_support: float = 1.0                                      # Support(c_primary, k)
+    rho_fov: dict = field(default_factory=dict)                      # entity_id -> rho_fov
+    responsible_camera: str = "PRIMARY_CAM"
+    responsibility_state: str = "PRIMARY"
+    prediction_horizon: float = 2.0
+    admissibility_status: str = "ADMISSIBLE"
+    corridor_support_records: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.recommended_direction:
@@ -119,7 +130,17 @@ class NavigationState:
             "is_stop": self.is_stop,
             "is_caution": self.is_caution,
             "all_scores": self.all_scores,
+            # Stage A fields
+            "critical_entities": self.critical_entities,
+            "camera_support": round(self.camera_support, 4),
+            "rho_fov": self.rho_fov,
+            "responsible_camera": self.responsible_camera,
+            "responsibility_state": self.responsibility_state,
+            "prediction_horizon": self.prediction_horizon,
+            "admissibility_status": self.admissibility_status,
+            "corridor_support_records": self.corridor_support_records,
         }
+
 
 
 # 100% backward compatibility alias
@@ -179,14 +200,17 @@ class DecisionMaker:
 
     def decide(
         self,
-        candidates: List,  # List[PathCandidate] sorted best-first
+        candidates: List,  # List[PathCandidate] sorted descending by score
         frame_id: int = 0,
         spatial_entities: Optional[List] = None,
         dynamic_conflicts: Optional[List] = None,
         wall_proximity: Optional[dict] = None,
+        corridor_support: Optional[dict] = None,
+        primary_camera_id: str = "PRIMARY_CAM",
     ) -> NavigationState:
         """
         Select the safest candidate and emit a navigation command.
+        Enforces physical safety constraints and perceptual-support admissibility.
 
         Parameters
         ----------
@@ -195,6 +219,8 @@ class DecisionMaker:
         spatial_entities : Optional[List[SpatialEntity]]
         dynamic_conflicts: Optional[List[DynamicConflict]]
         wall_proximity   : Optional[dict]
+        corridor_support : Optional[Dict[str, CorridorSupportRecord]]
+        primary_camera_id: str
 
         Returns
         -------
@@ -276,8 +302,21 @@ class DecisionMaker:
                 ttc=min_ttc,
             )
 
-        # --- Find best directional candidate
-        best = directional[0] if directional else None
+        # --- Filter candidates by Perceptual Support Admissibility Gate
+        admissible_directional = []
+        low_support_rejected = []
+        if corridor_support:
+            for c in directional:
+                sup_rec = corridor_support.get(c.direction)
+                if sup_rec is not None and not sup_rec.is_admissible and sup_rec.status_label == "INADMISSIBLE_LOW_SUPPORT":
+                    low_support_rejected.append(c)
+                else:
+                    admissible_directional.append(c)
+        else:
+            admissible_directional = directional
+
+        # --- Find best candidate (prioritizing perceptually admissible paths)
+        best = admissible_directional[0] if admissible_directional else (directional[0] if directional else None)
 
         if best is None:
             return self._make_stop_decision(
@@ -288,7 +327,7 @@ class DecisionMaker:
                 nearest_dist=nearest_dist,
             )
 
-        # --- Apply safety thresholds
+        # If best candidate is physically blocked
         if best.score < self.min_go_score:
             return self._make_stop_decision(
                 f"Best score {best.score:.3f} < min_go {self.min_go_score:.3f}",
@@ -307,11 +346,21 @@ class DecisionMaker:
                 nearest_dist=nearest_dist,
             )
 
+        # If all directional candidates failed perceptual support, issue cautious stop/warning
+        if not admissible_directional and low_support_rejected:
+            return self._make_stop_decision(
+                f"Perceptual observation of critical entities expiring across all corridors",
+                frame_id,
+                reason_code=NavigationReason.LOW_PERCEPTUAL_SUPPORT,
+                active_tracks=active_tracks,
+                nearest_dist=nearest_dist,
+            )
+
         # --- Apply hysteresis: only switch if improvement exceeds margin
         hysteresis_held = False
         if self._prev_command not in ("STOP", "CAUTION") and self._prev_decision is not None:
             prev_dir_candidate = next(
-                (c for c in candidates if c.direction == self._prev_command),
+                (c for c in admissible_directional if c.direction == self._prev_command),
                 None
             )
             if prev_dir_candidate is not None:
@@ -357,6 +406,13 @@ class DecisionMaker:
             f"(score={best.score:.3f}, clearance={best.clearance:.3f})"
         )
 
+        # Extract Stage A corridor support metadata
+        best_support_rec = corridor_support.get(best.direction) if corridor_support else None
+        crit_entities = best_support_rec.critical_entities if best_support_rec else []
+        cam_support = best_support_rec.perceptual_support if best_support_rec else 1.0
+        rho_dict = best_support_rec.entity_rho_fov if best_support_rec else {}
+        admiss_status = best_support_rec.status_label if best_support_rec else "ADMISSIBLE"
+
         state = NavigationState(
             command=best.direction,
             selected_path_direction=best.direction,
@@ -382,6 +438,22 @@ class DecisionMaker:
             is_caution=False,
             timestamp=time.time(),
             frame_id=frame_id,
+            # Stage A fields
+            critical_entities=crit_entities,
+            camera_support=cam_support,
+            rho_fov=rho_dict,
+            responsible_camera=primary_camera_id,
+            responsibility_state="PRIMARY",
+            prediction_horizon=2.0,
+            admissibility_status=admiss_status,
+            corridor_support_records={
+                d: {
+                    "support": rec.perceptual_support,
+                    "admissible": rec.is_admissible,
+                    "status": rec.status_label,
+                }
+                for d, rec in (corridor_support or {}).items()
+            },
         )
 
         self._update_stability(state)

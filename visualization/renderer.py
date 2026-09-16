@@ -810,30 +810,28 @@ class Renderer:
         y += 10
         cv2.line(panel, (bar_x0, y), (bar_x1, y), (50, 50, 80), 1)
 
-        # Path Calculation Formula Banner
+        # Stage A: Perceptual Support & Observation Validity Diagnostics
+        crit_ids = getattr(decision, "critical_entities", [])
+        cam_sup = getattr(decision, "camera_support", 1.0)
+        admiss = getattr(decision, "admissibility_status", "ADMISSIBLE")
+        crit_str = f"Ek:{crit_ids}" if crit_ids else "Ek:None"
+        cam_col = (100, 255, 100) if admiss == "ADMISSIBLE" else (50, 150, 255)
         y += 16
-        cv2.putText(panel, "PATH SCORING FORMULA (CORRIDOR EVALUATION):", (bar_x0, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 255), 1)
-        y += 16
-        formula_txt = "Score = 0.30*Clearance + 0.25*Free + 0.25*Progress - 0.15*Risk - 0.05*Curv"
-        cv2.putText(panel, formula_txt, (bar_x0, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, (170, 170, 210), 1)
-
-        # Divider
-        y += 10
-        cv2.line(panel, (bar_x0, y), (bar_x1, y), (50, 50, 80), 1)
+        sup_str = f"CAM SUPPORT: {cam_sup:.2f} | {crit_str} | {admiss}"
+        cv2.putText(panel, sup_str, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, cam_col, 1)
 
         # Table Header
         y += 16
         cv2.putText(panel, "CANDIDATE CORRIDOR RANKING:", (bar_x0, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
         y += 16
-        col_hdr = f"{'DIRECTION':14s} {'SCORE':7s} {'CLEARANCE':10s} {'RISK':6s} {'STATUS'}"
-        cv2.putText(panel, col_hdr, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 120, 160), 1)
+        col_hdr = f"{'DIR':12s} {'SCORE':6s} {'CLEAR':6s} {'RHO':5s} {'STATUS'}"
+        cv2.putText(panel, col_hdr, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (120, 120, 160), 1)
         y += 16
 
         # Candidate table entries
         cand_dict = {c.direction: c for c in candidates} if candidates else {}
+        corridor_records = getattr(decision, "corridor_support_records", {})
 
         for s in decision.all_scores:
             d_name = s["direction"]
@@ -843,11 +841,17 @@ class Renderer:
             cand_obj = cand_dict.get(d_name)
             clr_val = cand_obj.clearance if cand_obj else 0.0
             risk_val = cand_obj.risk if cand_obj else 0.0
+            sup_meta = corridor_records.get(d_name, {})
+            rho_val = sup_meta.get("support", 1.0)
 
             if is_sel:
                 status = "BEST (SELECTED)"
                 row_col = (0, 255, 255)
                 prefix = "> "
+            elif sup_meta.get("status") == "INADMISSIBLE_LOW_SUPPORT":
+                status = "LOW_RHO (INADM)"
+                row_col = (50, 150, 255)
+                prefix = "  "
             elif risk_val > 0.35 or clr_val < 0.20:
                 status = "BLOCKED (OBS)"
                 row_col = (70, 70, 220)
@@ -857,8 +861,8 @@ class Renderer:
                 row_col = (140, 140, 170)
                 prefix = "  "
 
-            row_text = f"{prefix}{d_name:12s} {score_val:5.2f}   {clr_val:5.2f}      {risk_val:5.2f}  {status}"
-            cv2.putText(panel, row_text, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.37, row_col, 1)
+            row_text = f"{prefix}{d_name:10s} {score_val:5.2f}  {clr_val:5.2f}  {rho_val:4.2f}  {status}"
+            cv2.putText(panel, row_text, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.36, row_col, 1)
             y += 16
             if y > self.panel_h - 20:
                 break

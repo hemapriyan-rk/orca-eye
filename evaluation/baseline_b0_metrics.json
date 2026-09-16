@@ -1,0 +1,42 @@
+{
+  "baseline_id": "B0",
+  "tag": "v0.1.0-baseline-b0",
+  "commit": "111e13d",
+  "timestamp": "2026-09-16T22:50:00Z",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "vram_total_mb": 6144,
+    "cuda_version": "12.x",
+    "fp16_enabled": true,
+    "cudnn_benchmark": true,
+    "tf32_enabled": true
+  },
+  "dataset": {
+    "source": "D:\\orca\\videos\\WhatsApp Video 2026-09-16 at 7.37.26 PM.mp4",
+    "raw_resolution": [478, 850],
+    "operational_resolution": [360, 640],
+    "raw_fps": 53.0,
+    "total_frames": 2335
+  },
+  "performance": {
+    "compute_latency_ms": {
+      "yolo_detection": 12.0,
+      "midas_depth": 9.5,
+      "freespace": 3.8,
+      "spatial_map_path_decision": 1.2,
+      "total_pipeline_ms": 22.0
+    },
+    "throughput_fps": {
+      "compute_fps": 45.4,
+      "display_fps": 35.0
+    },
+    "vram_usage_mb": 50.0
+  },
+  "safety_metrics": {
+    "total_failures": 0,
+    "false_clearances": 0,
+    "unnecessary_stops": 0,
+    "wall_collision_hazards_detected": 0
+  },
+  "control_status": "FROZEN_CONTROL_CONDITION"
+}

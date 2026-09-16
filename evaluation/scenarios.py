@@ -338,3 +338,197 @@ def list_scenarios() -> None:
         print(f"  Description : {s.description}")
         print(f"  Expected    : {s.expected_behavior}")
         print(f"  Failures    : {', '.join(s.failure_indicators)}")
+
+
+# ===========================================================================
+# Stage A: Controlled Navigation Scenario Suite (Synthetic & Deterministic)
+# ===========================================================================
+
+from enum import Enum
+
+
+class ControlledScenarioType(str, Enum):
+    CLEAR_PATH = "CLEAR_PATH"
+    CENTRAL_STATIC_OBSTACLE = "CENTRAL_STATIC_OBSTACLE"
+    LEFT_BLOCKED_RIGHT_OPEN = "LEFT_BLOCKED_RIGHT_OPEN"
+    RIGHT_BLOCKED_LEFT_OPEN = "RIGHT_BLOCKED_LEFT_OPEN"
+    BOTH_SIDES_BLOCKED = "BOTH_SIDES_BLOCKED"
+    CROSSING_PEDESTRIAN = "CROSSING_PEDESTRIAN"
+    BLIND_UNCERTAINTY = "BLIND_UNCERTAINTY"
+
+
+@dataclass
+class ControlledScenarioSpec:
+    scenario_type: ControlledScenarioType
+    name: str
+    description: str
+    expected_command: str
+    admissible_commands: List[str]
+
+
+CONTROLLED_SUITE: Dict[ControlledScenarioType, ControlledScenarioSpec] = {
+    ControlledScenarioType.CLEAR_PATH: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.CLEAR_PATH,
+        name="Clear Path",
+        description="Unobstructed straight corridor ahead with full visibility.",
+        expected_command="STRAIGHT",
+        admissible_commands=["STRAIGHT", "CONTINUE_STRAIGHT"],
+    ),
+    ControlledScenarioType.CENTRAL_STATIC_OBSTACLE: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.CENTRAL_STATIC_OBSTACLE,
+        name="Central Static Obstacle",
+        description="Stationary obstacle centered at x=0, y=2.0m requiring lateral veer.",
+        expected_command="SLIGHT_RIGHT",
+        admissible_commands=["SLIGHT_RIGHT", "SLIGHT_LEFT", "RIGHT", "LEFT"],
+    ),
+    ControlledScenarioType.LEFT_BLOCKED_RIGHT_OPEN: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.LEFT_BLOCKED_RIGHT_OPEN,
+        name="Left Blocked / Right Open",
+        description="Left side blocked by wall or obstacle, right side clear.",
+        expected_command="SLIGHT_RIGHT",
+        admissible_commands=["SLIGHT_RIGHT", "RIGHT"],
+    ),
+    ControlledScenarioType.RIGHT_BLOCKED_LEFT_OPEN: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.RIGHT_BLOCKED_LEFT_OPEN,
+        name="Right Blocked / Left Open",
+        description="Right side blocked by wall or obstacle, left side clear.",
+        expected_command="SLIGHT_LEFT",
+        admissible_commands=["SLIGHT_LEFT", "LEFT"],
+    ),
+    ControlledScenarioType.BOTH_SIDES_BLOCKED: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.BOTH_SIDES_BLOCKED,
+        name="Both Sides Blocked / Impassable",
+        description="Wall or obstacles completely blocking forward progress across all corridors.",
+        expected_command="STOP",
+        admissible_commands=["STOP"],
+    ),
+    ControlledScenarioType.CROSSING_PEDESTRIAN: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.CROSSING_PEDESTRIAN,
+        name="Crossing Pedestrian",
+        description="Pedestrian crossing laterally into wearer's forward corridor with imminent TTC.",
+        expected_command="STOP",
+        admissible_commands=["STOP", "CAUTION", "SLIGHT_LEFT", "SLIGHT_RIGHT"],
+    ),
+    ControlledScenarioType.BLIND_UNCERTAINTY: ControlledScenarioSpec(
+        scenario_type=ControlledScenarioType.BLIND_UNCERTAINTY,
+        name="Blind Uncertainty",
+        description="Sensor dropout or dense occlusion with high epistemic uncertainty.",
+        expected_command="STOP",
+        admissible_commands=["STOP", "CAUTION"],
+    ),
+}
+
+
+def create_synthetic_spatial_state(
+    scenario_type: ControlledScenarioType,
+    grid_rows: int = 12,
+    grid_cols: int = 20,
+):
+    """
+    Construct deterministic synthetic SpatialMap and SpatialEntity inputs
+    for a given ControlledScenarioType to enable regression testing.
+    """
+    from navigation.spatial_map import SpatialMap, GridCell
+    from navigation.spatial_entity import SpatialEntity
+
+    cfg = {"grid_rows": grid_rows, "grid_cols": grid_cols}
+    smap = SpatialMap(cfg, frame_width=640, frame_height=480)
+
+    # Initialize default clear map
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            smap.grid[r][c].occupancy = 0.05
+            smap.grid[r][c].free_prob = 0.90
+            smap.grid[r][c].uncertainty = 0.10
+            smap.grid[r][c].depth_mean = 0.80
+
+    mid_c = grid_cols // 2
+    entities: List[SpatialEntity] = []
+
+    if scenario_type == ControlledScenarioType.CLEAR_PATH:
+        # All clear, no entities
+        pass
+
+    elif scenario_type == ControlledScenarioType.CENTRAL_STATIC_OBSTACLE:
+        # Obstacle in center rows, leaving flanks open for SLIGHT_RIGHT / SLIGHT_LEFT detour
+        for r in range(grid_rows // 2, grid_rows - 3):
+            for c in range(mid_c - 1, mid_c + 2):
+                smap.grid[r][c].occupancy = 0.95
+                smap.grid[r][c].free_prob = 0.05
+        entities.append(SpatialEntity(
+            track_id=1,
+            class_id=56,  # chair
+            class_name="chair",
+            confidence=0.92,
+            bbox=[280, 200, 360, 380],
+            image_position=[320.0, 290.0],
+            ground_position=[320.0, 380.0],
+            relative_bearing=0.0,
+            relative_distance=0.35,
+            velocity=[0.0, 0.0],
+            motion_direction="stationary",
+            tracking_confidence=0.95,
+            depth_confidence=0.90,
+            depth_valid=True,
+            navigation_relevance=0.85,
+        ))
+
+    elif scenario_type == ControlledScenarioType.LEFT_BLOCKED_RIGHT_OPEN:
+        # Left side blocked, and forward straight path blocked ahead, right flank open
+        for r in range(grid_rows - 1):
+            for c in range(0, mid_c + 1):
+                smap.grid[r][c].occupancy = 0.95
+                smap.grid[r][c].free_prob = 0.05
+        # Bottom row (wearer position)
+        for c in range(0, mid_c):
+            smap.grid[grid_rows - 1][c].occupancy = 0.95
+            smap.grid[grid_rows - 1][c].free_prob = 0.05
+
+    elif scenario_type == ControlledScenarioType.RIGHT_BLOCKED_LEFT_OPEN:
+        # Right side blocked, and forward straight path blocked ahead, left flank open
+        for r in range(grid_rows - 1):
+            for c in range(mid_c, grid_cols):
+                smap.grid[r][c].occupancy = 0.95
+                smap.grid[r][c].free_prob = 0.05
+        # Bottom row (wearer position)
+        for c in range(mid_c + 1, grid_cols):
+            smap.grid[grid_rows - 1][c].occupancy = 0.95
+            smap.grid[grid_rows - 1][c].free_prob = 0.05
+
+    elif scenario_type == ControlledScenarioType.BOTH_SIDES_BLOCKED:
+        # Forward completely blocked
+        for r in range(grid_rows // 3, grid_rows):
+            for c in range(grid_cols):
+                smap.grid[r][c].occupancy = 0.98
+                smap.grid[r][c].free_prob = 0.02
+
+    elif scenario_type == ControlledScenarioType.CROSSING_PEDESTRIAN:
+        # Clear static map, but fast crossing pedestrian heading into center corridor
+        entities.append(SpatialEntity(
+            track_id=10,
+            class_id=0,  # person
+            class_name="person",
+            confidence=0.95,
+            bbox=[100, 180, 180, 420],
+            image_position=[140.0, 300.0],
+            ground_position=[140.0, 420.0],
+            relative_bearing=-20.0,
+            relative_distance=0.25,
+            velocity=[15.0, 0.0],  # fast lateral velocity across screen
+            motion_direction="crossing",
+            tracking_confidence=0.98,
+            depth_confidence=0.90,
+            depth_valid=True,
+            navigation_relevance=0.95,
+        ))
+
+    elif scenario_type == ControlledScenarioType.BLIND_UNCERTAINTY:
+        # High uncertainty everywhere
+        for r in range(grid_rows):
+            for c in range(grid_cols):
+                smap.grid[r][c].occupancy = 0.50
+                smap.grid[r][c].free_prob = 0.20
+                smap.grid[r][c].uncertainty = 0.95
+
+    return smap, entities
+
