@@ -330,6 +330,10 @@ class DepthEstimator:
         dummy = np.zeros((480, 640, 3), dtype=np.uint8)
         for _ in range(3):
             self.estimate(dummy)
+        self._last_result = None
+        self._call_count = 0
+        self._out_h = 0
+        self._out_w = 0
         logger.info("MiDaS warm-up complete.")
 
     @staticmethod

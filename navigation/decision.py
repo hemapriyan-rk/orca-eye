@@ -279,15 +279,18 @@ class DecisionMaker:
 
         # --- Imminent wall / static barrier collision check (< 1.0m ahead)
         if wall_proximity and wall_proximity.get("is_frontal_collision", False):
-            min_free = wall_proximity.get("min_frontal_free", 0.0)
-            return self._make_stop_decision(
-                f"Solid obstacle/wall directly ahead (<1.0m, clearance {min_free:.2f})",
-                frame_id,
-                reason_code=NavigationReason.WALL_COLLISION,
-                active_tracks=active_tracks,
-                conflict_tracks=conflict_tracks,
-                nearest_dist=min(nearest_dist, 0.8),
-            )
+            c3d = wall_proximity.get("frontal_clearance_3d_m")
+            # Only trigger STOP if 3D geometry confirms physical obstacle is < 1.2m ahead
+            if c3d is None or c3d < 1.20:
+                min_free = wall_proximity.get("min_frontal_free", 0.0)
+                return self._make_stop_decision(
+                    f"Solid obstacle/wall directly ahead (<1.0m, clearance {min_free:.2f})",
+                    frame_id,
+                    reason_code=NavigationReason.WALL_COLLISION,
+                    active_tracks=active_tracks,
+                    conflict_tracks=conflict_tracks,
+                    nearest_dist=min(nearest_dist, 0.8),
+                )
 
         # --- Imminent dynamic collision check on current heading
         if has_conflict and min_ttc is not None and min_ttc < 0.8:

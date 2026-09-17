@@ -16,7 +16,7 @@ Optional pyttsx3 TTS.
 import logging
 import math
 import time
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -116,6 +116,7 @@ class Renderer:
         spatial_entities: Optional[List] = None,
         dynamic_conflicts: Optional[List] = None,
         wall_proximity: Optional[dict] = None,
+        geometry_3d_result: Optional[Any] = None,
     ) -> np.ndarray:
         """
         Compose all four panels into a single BGR image.
@@ -124,10 +125,12 @@ class Renderer:
                                  candidates, decision, dynamic_conflicts,
                                  wall_proximity=wall_proximity, fps=fps, frame_id=frame_id)
         p2 = self._panel_freespace(frame, freespace_result)
-        p3 = self._panel_navigation_bw(frame, spatial_map, candidates, decision)
+        p3 = self._panel_navigation_bw(frame, spatial_map, candidates, decision,
+                                       geometry_3d_result=geometry_3d_result)
         p4 = self._panel_decision(decision, fps, frame_id, latency_ms,
                                   detection_result, freespace_result, candidates,
-                                  wall_proximity=wall_proximity)
+                                  wall_proximity=wall_proximity,
+                                  geometry_3d_result=geometry_3d_result)
 
         # Resize all panels to identical size before stacking
         p1 = self._ensure_size(p1)
@@ -596,6 +599,7 @@ class Renderer:
         spatial_map,
         candidates: List,
         decision,
+        geometry_3d_result: Optional[Any] = None,
     ) -> np.ndarray:
         """
         Background: greyscale camera frame with edge-enhanced detection cues.
@@ -659,10 +663,12 @@ class Renderer:
                 for i in range(len(pts_px) - 1):
                     cv2.line(panel, pts_px[i], pts_px[i + 1], (90, 90, 110), 1, cv2.LINE_AA)
 
-                # End tag with angle
+                # End tag with angle and 3D metric clearance
                 end_x, end_y = pts_px[-1]
-                cv2.putText(panel, f"{cand.angle_deg:+.0f}°", (end_x - 10, end_y - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.32, (140, 140, 160), 1)
+                c3d_val = getattr(cand, "corridor_3d_clearance_m", 0.0)
+                tag_txt = f"{cand.angle_deg:+.0f}d ({c3d_val:.1f}m)" if c3d_val > 0.0 else f"{cand.angle_deg:+.0f}d"
+                cv2.putText(panel, tag_txt, (end_x - 14, end_y - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.32, (150, 180, 220), 1)
 
                 # If this path had high risk or collided with an obstacle, draw a red collision cross
                 if cand.risk > 0.30 or cand.clearance < 0.25:
@@ -707,7 +713,9 @@ class Renderer:
 
                 # Score pill at midpoint
                 mid = center_pts[len(center_pts) // 2]
-                score_txt = f"{sel_cand.direction} ({sel_cand.score:.2f})"
+                c3d_sel = getattr(sel_cand, "corridor_3d_clearance_m", 0.0)
+                c3d_str = f" | 3D: {c3d_sel:.1f}m" if c3d_sel > 0.0 else ""
+                score_txt = f"{sel_cand.direction} ({sel_cand.score:.2f}{c3d_str})"
                 (tw, th), _ = cv2.getTextSize(score_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
                 cv2.rectangle(panel, (mid[0] + 6, mid[1] - th - 6), (mid[0] + tw + 14, mid[1] + 4), (0, 0, 0), -1)
                 cv2.putText(panel, score_txt, (mid[0] + 10, mid[1] - 1),
@@ -724,7 +732,7 @@ class Renderer:
         # --- 5. Direction arrow overlay (large, centred)
         self._draw_direction_arrow(panel, decision.command)
 
-        self._draw_panel_title(panel, "2D Navigation Grid & Corridor Lines")
+        self._draw_panel_title(panel, "3D Geometry & Corridor Lines")
         return panel
 
     # ------------------------------------------------------------------
@@ -741,6 +749,7 @@ class Renderer:
         freespace_result,
         candidates: Optional[List] = None,
         wall_proximity: Optional[dict] = None,
+        geometry_3d_result: Optional[Any] = None,
     ) -> np.ndarray:
         panel = np.zeros((self.panel_h, self.panel_w, 3), dtype=np.uint8)
         panel[:] = (12, 12, 28)  # very dark navy
@@ -778,28 +787,36 @@ class Renderer:
         conflict_txt = ""
         if getattr(decision, "dynamic_conflict", False):
             ttc = getattr(decision, "time_to_possible_conflict", None)
-            conflict_txt = f" | ⚠️ CONFLICT (TTC {ttc:.1f}s)" if ttc is not None else " | ⚠️ CONFLICT"
+            conflict_txt = f" | [CONFLICT] TTC {ttc:.1f}s" if ttc is not None else " | [CONFLICT]"
         reason_txt = getattr(decision, "reason", "")
         cv2.putText(panel, f"STATE: {dec_type}{conflict_txt} | {reason_txt[:38]}",
                     (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 255), 1)
 
-        # Wall proximity indicator
+        # Wall proximity indicator + 3D metric clearance
         if wall_proximity:
             lat_w = wall_proximity.get("lateral_warning")
             front_coll = wall_proximity.get("is_frontal_collision", False)
             min_free = wall_proximity.get("min_frontal_free", 1.0)
-            wall_str = f"WALL MONITOR: Front Free {min_free*100:.0f}%"
+            f3d = wall_proximity.get("frontal_clearance_3d_m")
+            f3d_str = f" | 3D: {f3d:.1f}m" if f3d is not None else ""
+            wall_str = f"WALL MONITOR: Front Free {min_free*100:.0f}%{f3d_str}"
             if front_coll:
-                wall_str += " | 🛑 COLLISION HAZARD"
+                wall_str += " | [HAZARD] COLLISION"
                 w_col = (50, 50, 255)
             elif lat_w:
-                wall_str += f" | ⚠️ CLOSE ON {lat_w}"
+                wall_str += f" | [CLOSE] {lat_w}"
                 w_col = (0, 165, 255)
             else:
                 wall_str += " | CLEAR"
                 w_col = (100, 220, 100)
             y += 16
             cv2.putText(panel, wall_str, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.36, w_col, 1)
+
+        # 3D Physical Geometry Pose & Recommendation
+        if geometry_3d_result is not None:
+            y += 16
+            g_str = f"3D POSE: Floor ~{geometry_3d_result.floor_height_m:.1f}m | Pitch: {geometry_3d_result.pitch_deg:+.1f}d | 3D Rec: {geometry_3d_result.best_direction}"
+            cv2.putText(panel, g_str, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (180, 220, 255), 1)
 
         # Performance & Stats row
         y += 18
@@ -825,7 +842,7 @@ class Renderer:
         cv2.putText(panel, "CANDIDATE CORRIDOR RANKING:", (bar_x0, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.40, (220, 220, 220), 1)
         y += 16
-        col_hdr = f"{'DIR':12s} {'SCORE':6s} {'CLEAR':6s} {'RHO':5s} {'STATUS'}"
+        col_hdr = f"{'DIR':10s} {'SCORE':5s} {'3D(m)':5s} {'CLEAR':5s} {'STATUS'}"
         cv2.putText(panel, col_hdr, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (120, 120, 160), 1)
         y += 16
 
@@ -841,6 +858,7 @@ class Renderer:
             cand_obj = cand_dict.get(d_name)
             clr_val = cand_obj.clearance if cand_obj else 0.0
             risk_val = cand_obj.risk if cand_obj else 0.0
+            c3d_val = getattr(cand_obj, "corridor_3d_clearance_m", 0.0) if cand_obj else 0.0
             sup_meta = corridor_records.get(d_name, {})
             rho_val = sup_meta.get("support", 1.0)
 
@@ -861,8 +879,9 @@ class Renderer:
                 row_col = (140, 140, 170)
                 prefix = "  "
 
-            row_text = f"{prefix}{d_name:10s} {score_val:5.2f}  {clr_val:5.2f}  {rho_val:4.2f}  {status}"
-            cv2.putText(panel, row_text, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.36, row_col, 1)
+            row_str = f"{prefix}{d_name:8s} {score_val:5.2f} {c3d_val:4.1f}m {clr_val:5.2f} {status}"
+            y += 15
+            cv2.putText(panel, row_str, (bar_x0, y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, row_col, 1)
             y += 16
             if y > self.panel_h - 20:
                 break

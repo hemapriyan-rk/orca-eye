@@ -1,15 +1,17 @@
 """
-ORCA EYE — Stage 7: Path Scorer
-=================================
-Implements the transparent baseline scoring function:
+ORCA EYE — Stage 7: Path Scorer  (3D-aware)
+============================================
+Implements the weighted scoring function:
 
-  Score(P_i) = w_c·C_i + w_f·F_i + w_p·P_i - w_r·R_i - w_u·U_i
+  Score(P_i) = w_c·C + w_f·F + w_p·P + w_depth·Depth - w_r·R - w_u·U - w_d·DC
 
-  C_i = obstacle clearance
-  F_i = free-space availability
-  P_i = forward progress
-  R_i = estimated collision risk
-  U_i = uncertainty penalty
+  C     = obstacle clearance (min free_prob)
+  F     = free-space availability
+  P     = forward progress
+  Depth = depth clearance (0=near/blocked, 1=far/open) — 3D awareness
+  R     = estimated collision risk
+  U     = uncertainty penalty
+  DC    = dynamic conflict penalty
 
 All weights are read from config.yaml. Nothing is hard-coded here.
 
@@ -40,18 +42,20 @@ class PathScorer:
     """
 
     def __init__(self, cfg: dict) -> None:
-        self.w_c: float = cfg.get("w_c", 0.30)
-        self.w_f: float = cfg.get("w_f", 0.25)
-        self.w_p: float = cfg.get("w_p", 0.25)
-        self.w_r: float = cfg.get("w_r", 0.15)
-        self.w_u: float = cfg.get("w_u", 0.05)
-        self.w_d: float = cfg.get("w_d", 0.20)
+        self.w_c:     float = cfg.get("w_c",     0.28)
+        self.w_f:     float = cfg.get("w_f",     0.22)
+        self.w_p:     float = cfg.get("w_p",     0.22)
+        self.w_r:     float = cfg.get("w_r",     0.15)
+        self.w_u:     float = cfg.get("w_u",     0.05)
+        self.w_d:     float = cfg.get("w_d",     0.18)
+        self.w_depth: float = cfg.get("w_depth", 0.15)   # 3D depth clearance reward
         self.stop_base_score: float = cfg.get("stop_base_score", 0.10)
 
         logger.info(
             "PathScorer weights — clearance:%.2f free:%.2f progress:%.2f "
-            "risk:%.2f uncertainty:%.2f dyn_conflict:%.2f stop:%.2f",
-            self.w_c, self.w_f, self.w_p, self.w_r, self.w_u, self.w_d, self.stop_base_score
+            "risk:%.2f uncertainty:%.2f dyn_conflict:%.2f depth:%.2f stop:%.2f",
+            self.w_c, self.w_f, self.w_p, self.w_r, self.w_u,
+            self.w_d, self.w_depth, self.stop_base_score,
         )
 
     # ------------------------------------------------------------------
@@ -104,40 +108,34 @@ class PathScorer:
 
     def _compute_score(self, p) -> float:
         """
-        Weighted scoring formula including dynamic conflict penalty.
+        Weighted scoring formula including 3D depth clearance and dynamic conflict.
 
-        Score(P_i) = w_c·C + w_f·F + w_p·P - w_r·R - w_u·U - w_d·D
+        Score(P) = w_c·C + w_f·F + w_p·P + w_depth·Depth - w_r·R - w_u·U - w_d·D
         """
-        # Clearance: min free_prob along path
         C = float(p.clearance if p.clearance > 0.0 else p.min_clearance)
-
-        # Free-space: free_space_score or 1 - risk
         F = float(p.free_space_score if p.free_space_score > 0.0 else (1.0 - p.risk))
-
-        # Progress: fraction of planned depth reached, scaled down by curvature
         P = float(p.progress) * (1.0 - 0.3 * p.curvature)
-
-        # Risk: mean occupancy along path (collision probability proxy)
         R = float(p.risk)
-
-        # Uncertainty: mean epistemic uncertainty
         U = float(p.uncertainty)
-
-        # Dynamic conflict: prospective collision with moving agents
         D = float(getattr(p, "dynamic_conflict_score", 0.0))
+        # 3D depth clearance: min depth along path (0=near/blocked, 1=far/open)
+        Depth = float(getattr(p, "depth_clearance", 0.5))
+        # Blend with 3D metric corridor clearance if available (rewards open corridors)
+        c3d = float(getattr(p, "corridor_3d_clearance_m", 0.0))
+        if c3d > 0.0:
+            Depth = 0.35 * Depth + 0.65 * min(1.0, c3d / 5.0)
 
         score = (
-            self.w_c * C
-            + self.w_f * F
-            + self.w_p * P
-            - self.w_r * R
-            - self.w_u * U
-            - self.w_d * D
+            self.w_c     * C
+            + self.w_f   * F
+            + self.w_p   * P
+            + self.w_depth * Depth     # reward paths that go through open 3D space
+            - self.w_r   * R
+            - self.w_u   * U
+            - self.w_d   * D
         )
 
-        # Clamp to [-0.1, 1.0] — can go slightly negative in worst case
-        score = max(-0.1, min(1.0, score))
-        score = round(score, 6)
+        score = max(-0.1, min(1.0, round(score, 6)))
         p.score = score
         p.total_score = score
         return score
@@ -146,15 +144,16 @@ class PathScorer:
         """Serialize scored candidates for logging."""
         return [
             {
-                "direction": c.direction,
-                "angle_deg": c.angle_deg,
-                "score": round(c.score, 4),
-                "clearance": round(c.clearance, 4),
+                "direction":       c.direction,
+                "angle_deg":       c.angle_deg,
+                "score":           round(c.score, 4),
+                "clearance":       round(c.clearance, 4),
+                "depth_clearance": round(getattr(c, "depth_clearance", 0.0), 4),
                 "dynamic_conflict": round(getattr(c, "dynamic_conflict_score", 0.0), 3),
-                "progress": round(c.progress, 4),
-                "risk": round(c.risk, 4),
-                "uncertainty": round(c.uncertainty, 4),
-                "is_stop": c.is_stop,
+                "progress":        round(c.progress, 4),
+                "risk":            round(c.risk, 4),
+                "uncertainty":     round(c.uncertainty, 4),
+                "is_stop":         c.is_stop,
             }
             for c in candidates
         ]

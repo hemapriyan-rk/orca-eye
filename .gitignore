@@ -4,6 +4,7 @@
 # Runtime outputs (large, session-specific)
 logs/
 failure_cases/
+scratch/
 data/scenarios/*.mp4
 data/scenarios/*.avi
 

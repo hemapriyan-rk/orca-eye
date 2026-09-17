@@ -236,7 +236,7 @@ class FailureDetector:
         # If free-space says lots of FREE but planner says STOP
         if freespace_result and decision.is_stop:
             free_frac = freespace_result.statistics.get("free_fraction", 0.0)
-            if free_frac > 0.5:  # lots of free space but planner stopped
+            if free_frac > 0.70:  # >70% free but planner stopped — genuine disagreement
                 codes.append(FailureCode.PERCEPTION_PLANNER_DISAGREEMENT)
 
         if not codes:

@@ -24,50 +24,64 @@ camera:
 # YOLO Object Detection
 # -----------------------------------------------------------------------------
 detection:
-  model: "yolov8n.pt"         # nano variant for speed
-  confidence_threshold: 0.40
+  # OIV7 model has 601 classes including Wall, Waste container (dustbin),
+  # Door, Stairs, Handrail — critical for navigation obstacle detection.
+  model: "yolov8n-oiv7.pt"
+  # TensorRT engine (auto-exported on first run for 3-4x speedup).
+  # Delete .engine file to force re-export (e.g. after changing imgsz).
+  engine_path: "yolov8n-oiv7.engine"
+  use_tensorrt: false         # set true only if tensorrt pip package is installed
+  confidence_threshold: 0.35
   nms_threshold: 0.45
   device: "cuda"
   half: true                  # FP16 — ~2x throughput on RTX
-  imgsz: 320                  # 320 is ~4x faster than 640, minimal accuracy loss for navigation
-  torch_compile: false        # set true on PyTorch 2.x for extra ~15% (first run slow)
-  # COCO class IDs to detect (0=person, 1=bicycle, 2=car, 3=motorcycle,
-  # 5=bus, 7=truck, 13=bench, 56=chair, 57=dining table, 58=potted plant,
-  # 60=dining table, 63=laptop — add/remove freely)
-  target_classes:
-    - 0    # person
-    - 1    # bicycle
-    - 2    # car
-    - 3    # motorcycle
-    - 5    # bus
-    - 7    # truck
-    - 8    # boat
-    - 11   # stop sign
-    - 13   # bench
-    - 56   # chair
-    - 57   # dining table
-    - 58   # potted plant
-    - 60   # dining table (duplicate intentional — alias)
-    - 63   # laptop
-    - 67   # cell phone
-    - 72   # tv
-    - 73   # laptop
-    - 77   # teddy bear (test object)
-  low_confidence_threshold: 0.25  # below this → detection considered unreliable
-  # Phase 1: Class-specific confidence thresholds
-  class_confidence_thresholds:
-    0: 0.38   # person
-    1: 0.35   # bicycle
-    2: 0.45   # car
-    56: 0.35  # chair
-    57: 0.35  # dining table
-  # Phase 1: Box size bounds (filters out micro-noise and full-screen glitches)
+  imgsz: 320                  # 320px: ~4x faster than 640, sufficient for navigation
+  torch_compile: false
+  # OIV7 class IDs — verified at runtime from model.names.
+  # null = detect all 601 classes (slower); list = filtered (fast).
+  # IDs below are approximate; loader resolves exact IDs from model.names at startup.
+  target_classes: null        # null = auto-resolve navigation classes from model.names
+  # Navigation-relevant OIV7 class name substrings (used when target_classes is null)
+  nav_class_names:
+    - "person"
+    - "wall"
+    - "waste container"
+    - "door"
+    - "stairs"
+    - "handrail"
+    - "chair"
+    - "bench"
+    - "bicycle"
+    - "car"
+    - "truck"
+    - "dining table"
+    - "potted plant"
+    - "trash can"
+    - "garbage bin"
+    - "waste bin"
+    - "barrel"
+    - "column"
+    - "pillar"
+    - "fence"
+    - "barrier"
+    - "cabinetry"
+    - "cart"
+  low_confidence_threshold: 0.25
+  # Class-specific confidence thresholds (resolved at runtime by class name)
+  class_conf_by_name:
+    person: 0.38
+    wall: 0.30          # lower thresh — walls are safety-critical
+    waste container: 0.30
+    door: 0.32
+    stairs: 0.32
+    car: 0.42
+  # Box size bounds
   min_box_dim: 12
   max_box_dim: 640
-  # Phase 1: Temporal confirmation & persistence
-  confirmation_frames: 2     # frames before NEW becomes CONFIRMED
-  persistence_frames: 3      # frames to retain tentative detection without drop
-  duplicate_iou_threshold: 0.70  # suppress overlapping duplicate bounding boxes
+  # Temporal confirmation
+  confirmation_frames: 1      # 1 = disabled (fastest); 2 = safer
+  persistence_frames: 3
+  duplicate_iou_threshold: 0.70
 
 # -----------------------------------------------------------------------------
 # Temporal Tracking
@@ -95,31 +109,33 @@ depth:
   half: true
   normalize: true
   enabled: true
-  skip_frames: 3              # run MiDaS every Nth frame (depth changes slowly)
+  skip_frames: 4              # run MiDaS every 4th frame (~7.5Hz depth, 30Hz detection)
+                              # IMPORTANT: pipeline now enforces this — saves ~14ms/frame
   # Phase 1: Object ROI robust depth extraction
-  roi_inner_ratio: 0.60       # sample inner 60% of bbox (avoids background contamination)
-  outlier_percentile_low: 10  # reject lowest 10% depth values
-  outlier_percentile_high: 90 # reject highest 10% depth values
+  roi_inner_ratio: 0.60
+  outlier_percentile_low: 10
+  outlier_percentile_high: 90
 
 # -----------------------------------------------------------------------------
 # Free-Space Estimation (Hybrid Option C)
 # -----------------------------------------------------------------------------
 freespace:
-  # Geometric prior: bottom fraction of image considered walkable by default
   walkable_bottom_fraction: 0.55
-  # Obstacle box inflation factor (bbox expanded by this ratio before masking)
   obstacle_inflation: 1.05
-  # Depth gradient threshold: pixels with grad > threshold marked OBSTACLE
   depth_gradient_threshold: 0.08
-  # Near-depth threshold: if normalized depth < this → likely obstacle
-  near_depth_threshold: 0.30
-  # Minimum free probability to classify cell as FREE (vs UNKNOWN)
-  free_probability_threshold: 0.55
-  # Labels
+  near_depth_threshold: 0.20
+  free_probability_threshold: 0.45
   labels:
     FREE: 0
     OBSTACLE: 1
     UNKNOWN: 2
+  # Depth-based large static obstacle heuristic (fallback for unclassified walls/bins)
+  # Runs GPU-side via morphological ops — no CPU transfer until final label map.
+  wall_detection:
+    enabled: true
+    near_depth_wall_thresh: 0.25   # depth < this = "near" candidate (was 0.35, too aggressive)
+    min_wall_region_frac: 0.12     # region must cover > 12% of frame (was 0.04, too sensitive)
+    max_wall_gradient: 0.03        # low gradient = flat/uniform = likely wall
 
 # -----------------------------------------------------------------------------
 # Spatial Navigation Map
@@ -127,43 +143,49 @@ freespace:
 spatial_map:
   grid_rows: 12
   grid_cols: 20
-  # Occupancy decay per frame (for temporal smoothing)
   occupancy_decay: 0.85
-  # Uncertainty boost per frame of no new data
   uncertainty_growth: 0.05
+  # Temporal ring buffer: fuse last N free-space maps.
+  # temporal max-pool reduces flicker; higher = more stable but slower to react.
+  temporal_window: 5
 
 # -----------------------------------------------------------------------------
 # Candidate Path Generation
 # -----------------------------------------------------------------------------
 path_generation:
-  # Candidate directions: angle offsets in degrees from straight ahead
-  # (negative = left, positive = right)
+  # A* 3D voxel pathfinding (row × col × depth_band grid)
+  # Replaces fixed arc sampling with optimal graph search.
+  use_astar: true
+  # Depth bands: thresholds for VERY_NEAR / NEAR / MID / FAR classification
+  depth_band_thresholds: [0.25, 0.45, 0.70]   # 4 bands: <0.25, <0.45, <0.70, >=0.70
+  # A* node cost weights
+  astar_w_occ: 3.0       # penalty for occupied cells
+  astar_w_depth: 2.0     # penalty for near-depth cells
+  astar_w_unc: 0.5       # penalty for uncertain cells
+  astar_w_curv: 0.3      # curvature penalty (prefer straight)
+  # Candidate goal columns (one A* search per goal = one PathCandidate)
   candidate_angles_deg:
-    - -30.0   # LEFT
-    - -15.0   # SLIGHT_LEFT
-    -  0.0    # STRAIGHT
-    - 15.0    # SLIGHT_RIGHT
-    - 30.0    # RIGHT
-  # Path arc sample points (number of grid steps along each trajectory)
-  path_depth: 8
-  # Minimum corridor width in grid cells to be considered viable
+    - -30.0
+    - -15.0
+    -  0.0
+    - 15.0
+    - 30.0
+  path_depth: 8          # max A* search depth in rows
   min_corridor_width: 2
-  # STOP candidate always included regardless of scene
   include_stop: true
 
 # -----------------------------------------------------------------------------
 # Path Scoring Weights
-# Score(P) = w_c*C + w_f*F + w_p*P - w_r*R - w_u*U
-# All weights should sum appropriately; tune experimentally.
+# Score(P) = w_c*C + w_f*F + w_p*P + w_depth*D - w_r*R - w_u*U - w_d*DC
 # -----------------------------------------------------------------------------
 scoring:
-  w_c: 0.30   # clearance weight
-  w_f: 0.25   # free-space weight
-  w_p: 0.25   # forward-progress weight
-  w_r: 0.15   # collision-risk penalty weight
-  w_u: 0.05   # uncertainty penalty weight
-  w_d: 0.20   # dynamic-object conflict penalty weight
-  # STOP path base score (it always scores this, representing "safe but zero progress")
+  w_c: 0.28      # clearance weight
+  w_f: 0.22      # free-space weight
+  w_p: 0.22      # forward-progress weight
+  w_r: 0.15      # collision-risk penalty weight
+  w_u: 0.05      # uncertainty penalty weight
+  w_d: 0.18      # dynamic-object conflict penalty weight
+  w_depth: 0.15  # depth clearance reward (3D — far cells preferred)
   stop_base_score: 0.10
 
 # -----------------------------------------------------------------------------

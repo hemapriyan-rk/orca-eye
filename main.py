@@ -122,7 +122,8 @@ def _run_parallel_gpu_inference(detector, depth_estimator, frame):
     Run YOLO and MiDaS truly concurrently on persistent CUDA streams via worker threads.
 
     Worker threads overlap CPU preparation and GPU kernel execution across
-    independent CUDA streams.
+    independent CUDA streams. No explicit synchronize() — CUDA stream ordering
+    and the .result() call provide the necessary memory fence.
     """
     streams = _get_gpu_streams()
     if streams is None:
@@ -141,14 +142,13 @@ def _run_parallel_gpu_inference(detector, depth_estimator, frame):
             with torch.cuda.stream(stream_depth):
                 return depth_estimator.estimate(frame)
 
-        fut_det = executor.submit(_run_det)
+        fut_det   = executor.submit(_run_det)
         fut_depth = executor.submit(_run_depth)
 
-        det_result = fut_det.result()
+        # .result() blocks CPU until thread completes; no explicit synchronize needed
+        det_result   = fut_det.result()
         depth_result = fut_depth.result()
 
-        # Wait for both streams to complete execution
-        torch.cuda.synchronize()
         return det_result, depth_result
 
     except Exception:
@@ -192,6 +192,7 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     from perception.depth     import DepthEstimator
     from perception.freespace import FreeSpaceEstimator
     from perception.calibration import CameraCalibration
+    from perception.geometry_3d import Geometry3D
     from navigation.spatial_map    import SpatialMap
     from navigation.path_generator import PathGenerator
     from navigation.path_scorer    import PathScorer
@@ -225,6 +226,7 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     camera_calib = CameraCalibration.from_fov(frame_width=W, frame_height=H, hfov_deg=hfov_val)
     logger.info("Calibrated Camera: %dx%d, HFOV=%.1f deg, fx=%.1f", W, H, camera_calib.hfov_deg, camera_calib.fx)
 
+    geometry_3d_engine      = Geometry3D(camera_calib)
     detector                = YOLODetector(cfg.get("detection", {}))
     tracker                 = CentroidTracker(cfg.get("tracking", {}))
     depth_estimator         = DepthEstimator(cfg.get("depth", {}))
@@ -254,6 +256,11 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     fps_stats  = _FPSStats(window=30)
     frame_id   = 0
 
+    # Depth skip: run MiDaS every `depth_skip` frames, reuse last result in between
+    depth_skip       = int(cfg.get("depth", {}).get("skip_frames", 4))
+    _last_depth      = None
+    _depth_frame_ctr = 0
+
     sys_logger.log_event("session_start", {
         "source": str(source), "resolution": [W, H], "session_id": session_id,
     })
@@ -273,11 +280,19 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
                 logger.info("Reached max frames (%d). Exiting pipeline loop.", max_frames)
                 break
 
-            # ── Stages 2+4a: YOLO + MiDaS (parallel CUDA streams) ───
+            # ── Stages 2+4a: YOLO every frame, MiDaS every depth_skip frames ─
             t_gpu = time.perf_counter()
-            detection_result, depth_result = _run_parallel_gpu_inference(
-                detector, depth_estimator, frame,
-            )
+            _depth_frame_ctr += 1
+            if _depth_frame_ctr % depth_skip == 0 or _last_depth is None:
+                # Full parallel inference (YOLO + MiDaS)
+                detection_result, depth_result = _run_parallel_gpu_inference(
+                    detector, depth_estimator, frame,
+                )
+                _last_depth = depth_result
+            else:
+                # YOLO only (TRT — fast); reuse last depth result
+                detection_result = detector.detect(frame)
+                depth_result = _last_depth
             gpu_ms = (time.perf_counter() - t_gpu) * 1000.0
 
             # ── Stage 3: Tracker ─────────────────────────────────────
@@ -298,6 +313,13 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
                 frame_h=H,
             )
 
+            # ── Stage 4c: 3D Egocentric Geometry & Corridor Analysis ──
+            geometry_3d_result = None
+            if depth_result.is_valid and depth_result.depth_map is not None:
+                geometry_3d_result = geometry_3d_engine.analyze(
+                    depth_result.depth_map, detection_result.objects
+                )
+
             # ── Stage 4b: Free-space (CUDA tensors) ──────────────────
             freespace_result = fs_estimator.estimate(
                 frame, depth_result, detection_result.objects
@@ -305,10 +327,10 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
 
             # ── Stage 5: Spatial map ──────────────────────────────────
             spatial_map.update(freespace_result, depth_result, tracks)
-            wall_proximity = spatial_map.evaluate_wall_proximity()
+            wall_proximity = spatial_map.evaluate_wall_proximity(geometry_3d_result=geometry_3d_result)
 
             # ── Stage 6: Path generation ──────────────────────────────
-            candidates = path_generator.generate(spatial_map)
+            candidates = path_generator.generate(spatial_map, geometry_3d_result=geometry_3d_result)
 
             # ── Stage 6b: Dynamic conflict reasoning ─────────────────
             fps_estimate = fps_stats.tick()
@@ -411,6 +433,7 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
                 spatial_entities=spatial_entities,
                 dynamic_conflicts=active_conflicts,
                 wall_proximity=wall_proximity,
+                geometry_3d_result=geometry_3d_result,
             )
             key = renderer.show(composite)
             if key == ord("q"):
