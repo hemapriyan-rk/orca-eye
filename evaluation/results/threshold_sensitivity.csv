@@ -1,0 +1,8 @@
+tau_cam,false_safe_rate_pct,false_rejection_rate_pct,hazardous_selection_rate_pct,stop_rate_pct,corridor_rejection_rate_pct
+0.2,5.0,0.0,5.0,95.0,32.2
+0.3,0.0,0.0,0.0,100.0,34.2
+0.4,0.0,0.0,0.0,100.0,34.2
+0.5,0.0,0.0,0.0,100.0,34.2
+0.6,0.0,0.0,0.0,100.0,34.2
+0.7,0.0,0.0,0.0,100.0,34.2
+0.8,0.0,0.0,0.0,100.0,34.2

@@ -225,6 +225,111 @@ class SpatialMap:
             obj_map = self._build_object_map(tracks, label_map.shape)
             self._update_semantic_labels(obj_map)
 
+    def update_dual(
+        self,
+        freespace_result0,
+        depth_result0,
+        tracks0: List,
+        freespace_result1,
+        depth_result1,
+        tracks1: List,
+        spatial_entities: Optional[List] = None,
+    ) -> None:
+        """
+        Vectorized dual-primary camera grid update.
+        Fuses CAM0 (Left Primary: -50 to +15 deg) and CAM1 (Right Primary: -15 to +50 deg)
+        with symmetric center overlap (-15 to +15 deg) across self.cols columns.
+
+        Mapping across 20 columns:
+          - Cols 0..6:   Left flank (CAM0 exclusive, -50 to -15 deg)
+          - Cols 7..12:  Center overlap (Observed by BOTH CAM0 and CAM1, -15 to +15 deg)
+          - Cols 13..19: Right flank (CAM1 exclusive, +15 to +50 deg)
+        """
+        self._ts = time.time()
+
+        # Cam 0 maps
+        label_map0     = freespace_result0.label_map if freespace_result0 else np.zeros((self.frame_h, self.frame_w), dtype=np.uint8)
+        free_prob_map0 = freespace_result0.free_prob_map if freespace_result0 else np.full((self.frame_h, self.frame_w), 0.5, dtype=np.float32)
+        depth_map0     = depth_result0.depth_map if (depth_result0 and depth_result0.is_valid and depth_result0.depth_map is not None) else np.ones((self.frame_h, self.frame_w), dtype=np.float32)
+
+        # Cam 1 maps
+        label_map1     = freespace_result1.label_map if freespace_result1 else np.zeros((self.frame_h, self.frame_w), dtype=np.uint8)
+        free_prob_map1 = freespace_result1.free_prob_map if freespace_result1 else np.full((self.frame_h, self.frame_w), 0.5, dtype=np.float32)
+        depth_map1     = depth_result1.depth_map if (depth_result1 and depth_result1.is_valid and depth_result1.depth_map is not None) else np.ones((self.frame_h, self.frame_w), dtype=np.float32)
+
+        # Resize CAM0 to 13 columns (covers cols 0..12 of 20)
+        obs_mask0 = (label_map0 == 1).astype(np.float32)
+        unk_mask0 = (label_map0 == 2).astype(np.float32)
+        c0_obs   = cv2.resize(obs_mask0,      (13, self.rows), interpolation=cv2.INTER_AREA)
+        c0_free  = cv2.resize(free_prob_map0, (13, self.rows), interpolation=cv2.INTER_AREA)
+        c0_depth = cv2.resize(depth_map0,     (13, self.rows), interpolation=cv2.INTER_AREA)
+        c0_unk   = cv2.resize(unk_mask0,      (13, self.rows), interpolation=cv2.INTER_AREA)
+
+        # Resize CAM1 to 13 columns (covers cols 7..19 of 20)
+        obs_mask1 = (label_map1 == 1).astype(np.float32)
+        unk_mask1 = (label_map1 == 2).astype(np.float32)
+        c1_obs   = cv2.resize(obs_mask1,      (13, self.rows), interpolation=cv2.INTER_AREA)
+        c1_free  = cv2.resize(free_prob_map1, (13, self.rows), interpolation=cv2.INTER_AREA)
+        c1_depth = cv2.resize(depth_map1,     (13, self.rows), interpolation=cv2.INTER_AREA)
+        c1_unk   = cv2.resize(unk_mask1,      (13, self.rows), interpolation=cv2.INTER_AREA)
+
+        down_obs   = np.zeros((self.rows, self.cols), dtype=np.float32)
+        down_free  = np.full((self.rows, self.cols), 0.5, dtype=np.float32)
+        down_depth = np.ones((self.rows, self.cols), dtype=np.float32)
+        down_unk   = np.full((self.rows, self.cols), 0.5, dtype=np.float32)
+
+        # 1. Left exclusive columns (0..6) from CAM0
+        down_obs[:, :7]   = c0_obs[:, :7]
+        down_free[:, :7]  = c0_free[:, :7]
+        down_depth[:, :7] = c0_depth[:, :7]
+        down_unk[:, :7]   = c0_unk[:, :7]
+
+        # 2. Right exclusive columns (13..19) from CAM1 (cols 6..12 of CAM1)
+        down_obs[:, 13:]   = c1_obs[:, 6:]
+        down_free[:, 13:]  = c1_free[:, 6:]
+        down_depth[:, 13:] = c1_depth[:, 6:]
+        down_unk[:, 13:]   = c1_unk[:, 6:]
+
+        # 3. Center overlap columns (7..12): fused from CAM0 (cols 7..12) and CAM1 (cols 0..5)
+        down_obs[:, 7:13]   = np.maximum(c0_obs[:, 7:13], c1_obs[:, :6])
+        down_free[:, 7:13]  = np.minimum(c0_free[:, 7:13], c1_free[:, :6])
+        down_depth[:, 7:13] = np.minimum(c0_depth[:, 7:13], c1_depth[:, :6])
+        down_unk[:, 7:13]   = 0.5 * (c0_unk[:, 7:13] + c1_unk[:, :6]) * 0.85
+
+        # ── Temporal ring buffer update ────────────────────────────────────
+        self._free_history.append(down_free.copy())
+        self._depth_history.append(down_depth.copy())
+
+        if len(self._free_history) >= 2:
+            obs_detected = (down_obs > 0.25) | (down_free < 0.30)
+            mean_free = np.mean(list(self._free_history), axis=0)
+            temporal_free = np.where(obs_detected, down_free, mean_free)
+        else:
+            temporal_free = down_free
+
+        if len(self._depth_history) >= 2:
+            temporal_depth = np.mean(list(self._depth_history), axis=0)
+        else:
+            temporal_depth = down_depth
+
+        # Temporal decay and obstacle update
+        self.occ_arr *= self.decay
+        self.occ_arr += down_obs * (1.0 - self.decay)
+        np.clip(self.occ_arr, 0.0, 1.0, out=self.occ_arr)
+
+        self.free_arr = 0.7 * temporal_free + 0.3 * (1.0 - self.occ_arr)
+        np.clip(self.free_arr, 0.0, 1.0, out=self.free_arr)
+
+        self.depth_arr = temporal_depth
+        self.unc_arr = down_unk
+        np.clip(self.unc_arr, 0.0, 1.0, out=self.unc_arr)
+
+        # Semantic labels from tracked objects
+        all_tracks = list(tracks0 or []) + list(tracks1 or [])
+        if all_tracks:
+            obj_map = self._build_object_map(all_tracks, label_map0.shape)
+            self._update_semantic_labels(obj_map)
+
     def get_cell(self, row: int, col: int) -> Optional[GridCell]:
         """Return a GridCell view at (row, col). Wrapper for backward compatibility."""
         if 0 <= row < self.rows and 0 <= col < self.cols:

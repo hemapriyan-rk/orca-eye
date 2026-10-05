@@ -182,6 +182,7 @@ class DecisionMaker:
         self.hysteresis: float = cfg.get("direction_hysteresis", 0.08)
         self.stability_window: int = cfg.get("stability_window", 10)
         self.max_changes: int = cfg.get("max_direction_changes", 4)
+        self.enable_support_gate: bool = cfg.get("enable_support_gate", True)
 
         self._prev_decision: Optional[NavigationState] = None
         self._prev_command: str = "STRAIGHT"
@@ -207,6 +208,7 @@ class DecisionMaker:
         wall_proximity: Optional[dict] = None,
         corridor_support: Optional[dict] = None,
         primary_camera_id: str = "PRIMARY_CAM",
+        enable_support_gate: Optional[bool] = None,
     ) -> NavigationState:
         """
         Select the safest candidate and emit a navigation command.
@@ -278,11 +280,32 @@ class DecisionMaker:
                 )
 
         # --- Imminent wall / static barrier collision check (< 1.0m ahead)
+        frontal_obstacle_avoidance = False
         if wall_proximity and wall_proximity.get("is_frontal_collision", False):
             c3d = wall_proximity.get("frontal_clearance_3d_m")
-            # Only trigger STOP if 3D geometry confirms physical obstacle is < 1.2m ahead
-            if c3d is None or c3d < 1.20:
-                min_free = wall_proximity.get("min_frontal_free", 0.0)
+            min_free = wall_proximity.get("min_frontal_free", 0.0)
+            is_emergency = (c3d is not None and c3d < 0.45) or (min_free < 0.05) or (nearest_dist < 0.45)
+
+            if is_emergency:
+                return self._make_stop_decision(
+                    f"Immediate collision hazard ahead (<0.45m, clearance {min_free:.2f})",
+                    frame_id,
+                    reason_code=NavigationReason.WALL_COLLISION,
+                    active_tracks=active_tracks,
+                    conflict_tracks=conflict_tracks,
+                    nearest_dist=min(nearest_dist, 0.45),
+                )
+
+            # Check if any non-straight corridor has sufficient clearance to steer around
+            safe_alternatives = [
+                c for c in directional
+                if c.direction != "STRAIGHT"
+                and c.score >= self.min_go_score
+                and c.clearance >= self.min_clearance
+            ]
+
+            if not safe_alternatives:
+                # No safe escape corridor available -> halt safely
                 return self._make_stop_decision(
                     f"Solid obstacle/wall directly ahead (<1.0m, clearance {min_free:.2f})",
                     frame_id,
@@ -290,6 +313,12 @@ class DecisionMaker:
                     active_tracks=active_tracks,
                     conflict_tracks=conflict_tracks,
                     nearest_dist=min(nearest_dist, 0.8),
+                )
+            else:
+                frontal_obstacle_avoidance = True
+                logger.info(
+                    "Frontal corridor blocked; steering around hazard via %d alternative candidates.",
+                    len(safe_alternatives),
                 )
 
         # --- Imminent dynamic collision check on current heading
@@ -305,18 +334,24 @@ class DecisionMaker:
                 ttc=min_ttc,
             )
 
-        # --- Filter candidates by Perceptual Support Admissibility Gate
+        # --- Filter candidates by Perceptual Support Admissibility Gate (B0 vs B1 mode)
+        gate_active = self.enable_support_gate if enable_support_gate is None else enable_support_gate
         admissible_directional = []
         low_support_rejected = []
-        if corridor_support:
+        if corridor_support and gate_active:
             for c in directional:
+                if frontal_obstacle_avoidance and c.direction == "STRAIGHT":
+                    continue
                 sup_rec = corridor_support.get(c.direction)
                 if sup_rec is not None and not sup_rec.is_admissible and sup_rec.status_label == "INADMISSIBLE_LOW_SUPPORT":
                     low_support_rejected.append(c)
                 else:
                     admissible_directional.append(c)
         else:
-            admissible_directional = directional
+            if frontal_obstacle_avoidance:
+                admissible_directional = [c for c in directional if c.direction != "STRAIGHT"]
+            else:
+                admissible_directional = directional
 
         # --- Find best candidate (prioritizing perceptually admissible paths)
         best = admissible_directional[0] if admissible_directional else (directional[0] if directional else None)
@@ -392,10 +427,10 @@ class DecisionMaker:
         # Determine decision category
         if has_conflict and min_ttc is not None and min_ttc < 1.8:
             decision_type = "SLOW"
+        elif frontal_obstacle_avoidance or best.direction in ("LEFT", "RIGHT", "SLIGHT_LEFT", "SLIGHT_RIGHT"):
+            decision_type = "TURN"
         elif wall_warn:
             decision_type = "CAUTION"
-        elif best.direction in ("LEFT", "RIGHT", "SLIGHT_LEFT", "SLIGHT_RIGHT"):
-            decision_type = "TURN"
         else:
             decision_type = "GO"
 
@@ -404,8 +439,9 @@ class DecisionMaker:
             else f"[{NavigationReason.CLEAR_PATH}] "
         )
         wall_tag = f"[{NavigationReason.WALL_PROXIMITY}: {wall_warn}] " if wall_warn else ""
+        avoid_tag = "[AVOIDANCE] Frontal obstacle ahead — steering around hazard via " if frontal_obstacle_avoidance else "Best scored path: "
         reason_str = (
-            f"{wall_tag}{reason_tag}Best scored path: {best.direction} "
+            f"{wall_tag}{reason_tag}{avoid_tag}{best.direction} "
             f"(score={best.score:.3f}, clearance={best.clearance:.3f})"
         )
 

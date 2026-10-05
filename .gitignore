@@ -3,7 +3,8 @@
 
 # Runtime outputs (large, session-specific)
 logs/
-failure_cases/
+failure_cases/*
+!failure_cases/stage_a/
 scratch/
 data/scenarios/*.mp4
 data/scenarios/*.avi

@@ -139,3 +139,4 @@ def create_spatial_entities(
     # Sort entities by navigation relevance (most critical first)
     entities.sort(key=lambda e: e.navigation_relevance, reverse=True)
     return entities
+

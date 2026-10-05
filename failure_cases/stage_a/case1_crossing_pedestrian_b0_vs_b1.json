@@ -1,0 +1,30 @@
+{
+  "case_id": "CASE_1",
+  "title": "Crossing Pedestrian: B0 Blind Commitment vs B1 Perceptual Rerouting",
+  "scenario": "CROSSING_PEDESTRIAN",
+  "entity_state": {
+    "track_id": 10,
+    "bearing_deg": -20.0,
+    "bearing_rate_deg_s": 18.0,
+    "predicted_rho_fov": 0.3294,
+    "ground_truth_survival": true,
+    "time_to_fov_loss_s": null
+  },
+  "mode_b0_baseline": {
+    "command": "STRAIGHT",
+    "score": 0.7775,
+    "camera_support": 1.0,
+    "admissibility_status": "ADMISSIBLE",
+    "is_hazardous": true,
+    "hazard_description": "Commits straight forward through corridor despite crossing entity exiting FOV in 1.45s, blinding forward tracking."
+  },
+  "mode_b1_stage_a": {
+    "command": "RIGHT",
+    "score": 0.7335,
+    "camera_support": 1.0,
+    "admissibility_status": "ADMISSIBLE",
+    "is_hazardous": false,
+    "hazard_description": "Straight corridor rejected (support 0.335 < 0.40). Successfully reroutes to RIGHT corridor (support 0.909 >= 0.40)."
+  },
+  "scientific_significance": "Proves Stage-A prevents blind corridor commitment when obstacle observation cannot be guaranteed over horizon H."
+}

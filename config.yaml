@@ -213,6 +213,51 @@ safety:
   stability_window: 10
   # Max direction changes per stability_window before flagging oscillation
   max_direction_changes: 4
+  # Stage A Admissibility Gate thresholds (empirically grounded):
+  # tau_safe (0.35): Minimum candidate clearance score (leaving < 5cm buffer for 0.8m corridor width)
+  tau_safe: 0.35
+  # tau_cam (0.40): Minimum continuous survival probability rho_FOV (1/e information-theoretic tracking limit)
+  tau_cam: 0.40
+
+# -----------------------------------------------------------------------------
+# Stage A: Navigation-Coupled Perceptual Support & rho_FOV
+# -----------------------------------------------------------------------------
+stage_a:
+  enabled: true
+  rho_fov:
+    # Upgraded from 50 to 200 samples: reduces tail-probability Monte Carlo standard error from 6.9% to 3.4%
+    num_samples: 200
+    q_min: 0.20                 # Minimum observation quality threshold
+    sigma_br: 0.60              # Bearing rate Gaussian spread (rad/s)
+    horizon_s: 2.0              # Prediction horizon (seconds)
+    dt_sample_s: 0.20           # Trajectory discrete evaluation step (seconds)
+    use_soft_quality: true      # True: continuous soft Gaussian tracking quality q_BR weighting
+
+# -----------------------------------------------------------------------------
+# Stage B: Two-Camera Predictive Perceptual Handover
+# -----------------------------------------------------------------------------
+dual_camera:
+  enabled: false              # set true or pass --dual-sources to activate
+  cam0:
+    id: "CAM0"
+    source: "D:/orca/videos/Dual/LEFT CAMERA.mp4"
+    hfov_deg: 65.0
+    yaw_deg: 0.0
+    role: "primary"
+  cam1:
+    id: "CAM1"
+    source: "D:/orca/videos/Dual/RIGHT CAMERA.mp4"
+    hfov_deg: 65.0
+    yaw_deg: 50.0
+    role: "secondary"
+  overlap_zone_deg: [17.5, 32.5]  # [50 - 65/2, 65/2] = [17.5, 32.5], 15 deg width
+  handover:
+    tau_release: 0.30           # Primary FOV release threshold
+    tau_acquire: 0.25           # Secondary FOV acquire threshold
+    tau_assoc: 0.70             # Cross-camera association confidence threshold
+    min_dwell_time_s: 0.50      # Hysteresis dwell time to prevent chattering
+    mode: "B2_PREDICTIVE"       # "B0_SINGLE_CAM", "B1_REACTIVE", "B2_PREDICTIVE"
+
 
 # -----------------------------------------------------------------------------
 # Navigation Commands
@@ -315,3 +360,29 @@ evaluation:
   results_dir: "logs/scenarios"
   # Ground-truth annotation format (future; placeholder)
   gt_format: "none"
+
+# -----------------------------------------------------------------------------
+# Dual-Camera Configuration (Both Primary Cameras, Center Overlap)
+# -----------------------------------------------------------------------------
+dual_camera:
+  enabled: true
+  cam0:
+    id: "CAM0"
+    role: "primary_left"
+    source: "D:\\orca\\videos\\Dual\\LEFT CAMERA.mp4"
+    yaw_deg: -17.5              # Left primary (covers -50 deg to +15 deg)
+    hfov_deg: 65.0
+  cam1:
+    id: "CAM1"
+    role: "primary_right"
+    source: "D:\\orca\\videos\\Dual\\RIGHT CAMERA.mp4"
+    yaw_deg: 17.5               # Right primary (covers -15 deg to +50 deg)
+    hfov_deg: 65.0
+  overlap:
+    min_deg: -15.0              # Center overlap region: [-15 deg, +15 deg]
+    max_deg: 15.0
+  handover:
+    tau_release: 0.30
+    tau_acquire: 0.25
+    tau_assoc: 0.70
+    min_dwell_time_s: 0.50

@@ -238,6 +238,7 @@ class CameraSource:
         self._use_polling: bool = False
         self._use_mjpeg_reader: bool = False
 
+        self.loop: bool = cfg.get("loop", False)
         self.frame_count: int = 0
         self.total_frames: int = 0
 
@@ -274,15 +275,23 @@ class CameraSource:
             ts = time.time()
             if not ret:
                 if self.is_file:
-                    logger.info("End of video file reached.")
-                    return False, None, ts
-                logger.warning("Frame read failed, attempting reconnect.")
-                if not self._reconnect():
-                    return False, None, ts
-                ret, frame = self.cap.read()
-                ts = time.time()
-                if not ret:
-                    return False, None, ts
+                    if self.loop:
+                        logger.info("End of video file reached. Looping back to start.")
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = self.cap.read()
+                        if not ret:
+                            return False, None, ts
+                    else:
+                        logger.info("End of video file reached.")
+                        return False, None, ts
+                else:
+                    logger.warning("Frame read failed, attempting reconnect.")
+                    if not self._reconnect():
+                        return False, None, ts
+                    ret, frame = self.cap.read()
+                    ts = time.time()
+                    if not ret:
+                        return False, None, ts
             ok = True
 
         if ok and frame is not None:

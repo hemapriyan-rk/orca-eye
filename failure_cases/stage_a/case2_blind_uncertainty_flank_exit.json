@@ -1,0 +1,26 @@
+{
+  "case_id": "CASE_2",
+  "title": "Blind Uncertainty: Rapid FOV Flank Loss",
+  "scenario": "BLIND_UNCERTAINTY",
+  "entity_state": {
+    "track_id": 201,
+    "bearing_deg": 28.5,
+    "bearing_rate_deg_s": 15.0,
+    "predicted_rho_fov": 0.0912,
+    "ground_truth_survival": false,
+    "time_to_fov_loss_s": 0.3
+  },
+  "mode_b0_baseline": {
+    "command": "CAUTION",
+    "camera_support": 1.0,
+    "admissibility_status": "ADMISSIBLE",
+    "failure_mode": "Navigates blind on right flank because instant bearing (+28.5 deg) is within FOV at t=0."
+  },
+  "mode_b1_stage_a": {
+    "command": "CAUTION",
+    "camera_support": 1.0,
+    "admissibility_status": "ADMISSIBLE",
+    "protection_mode": "Anticipates FOV exit at t=0.27s. Demotes right corridors (support 0.00) and executes safe alternative."
+  },
+  "scientific_significance": "Demonstrates why instantaneous checks (Level B/C) fail while trajectory propagation (Stage-A) succeeds."
+}

@@ -1,0 +1,376 @@
+{
+  "benchmark_timestamp": 1789624720.132019,
+  "total_trials": 2400,
+  "elapsed_seconds": 51.08,
+  "overall_by_mode": {
+    "B0_SINGLE_CAM": {
+      "trial_count": 800,
+      "mean_lead_time_s": 0.0,
+      "median_lead_time_s": 0.0,
+      "p95_lead_time_s": 0.0,
+      "mean_observation_gap_s": -0.9176500000000002,
+      "median_observation_gap_s": -0.89,
+      "mean_continuity_ratio": 0.7301000000000001,
+      "p5_continuity_ratio": 0.36,
+      "mean_handover_latency_s": 0.0,
+      "false_handover_rate_pct": 0.0,
+      "missed_handover_rate_pct": 50.0
+    },
+    "B1_REACTIVE": {
+      "trial_count": 800,
+      "mean_lead_time_s": -0.027575000000000002,
+      "median_lead_time_s": -0.02,
+      "p95_lead_time_s": 0.0,
+      "mean_observation_gap_s": -0.9176500000000002,
+      "median_observation_gap_s": -0.89,
+      "mean_continuity_ratio": 0.960625,
+      "p5_continuity_ratio": 0.68,
+      "mean_handover_latency_s": 0.0,
+      "false_handover_rate_pct": 0.0,
+      "missed_handover_rate_pct": 0.0
+    },
+    "B2_PREDICTIVE": {
+      "trial_count": 800,
+      "mean_lead_time_s": 0.7324662162162162,
+      "median_lead_time_s": 0.73,
+      "p95_lead_time_s": 0.9225000000000001,
+      "mean_observation_gap_s": -0.9176500000000002,
+      "median_observation_gap_s": -0.89,
+      "mean_continuity_ratio": 0.909975,
+      "p5_continuity_ratio": 0.6,
+      "mean_handover_latency_s": 0.13678929765886289,
+      "false_handover_rate_pct": 0.38,
+      "missed_handover_rate_pct": 13.0
+    }
+  },
+  "by_scenario": {
+    "S1_CENTER_TO_RIGHT": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.9511000000000002,
+        "median_observation_gap_s": -0.94,
+        "mean_continuity_ratio": 0.7048000000000002,
+        "p5_continuity_ratio": 0.6,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 100.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": -0.021799999999999996,
+        "median_lead_time_s": -0.02,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.9511000000000002,
+        "median_observation_gap_s": -0.94,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.7957,
+        "median_lead_time_s": 0.77,
+        "p95_lead_time_s": 0.99,
+        "mean_observation_gap_s": -0.9511000000000002,
+        "median_observation_gap_s": -0.94,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.13449999999999998,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    },
+    "S2_CENTER_TO_LEFT": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 0.705,
+        "p5_continuity_ratio": 0.58,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 0.705,
+        "p5_continuity_ratio": 0.58,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 0.705,
+        "p5_continuity_ratio": 0.58,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    },
+    "S3_FAST_PERIPHERAL": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.8494999999999999,
+        "median_observation_gap_s": -0.83,
+        "mean_continuity_ratio": 0.47100000000000003,
+        "p5_continuity_ratio": 0.4,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 100.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": -0.018500000000000003,
+        "median_lead_time_s": -0.02,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.8494999999999999,
+        "median_observation_gap_s": -0.83,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.6525,
+        "median_lead_time_s": 0.65,
+        "p95_lead_time_s": 0.9,
+        "mean_observation_gap_s": -0.8494999999999999,
+        "median_observation_gap_s": -0.83,
+        "mean_continuity_ratio": 0.9747999999999999,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.1421875,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 4.0
+      }
+    },
+    "S4_SLOW_PERIPHERAL": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.125,
+        "false_handover_rate_pct": 2.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    },
+    "S5_OVERLAP_TRAVERSAL": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.15,
+        "false_handover_rate_pct": 1.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    },
+    "S6_OCCLUSION_HANDOVER": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.9899999999999999,
+        "median_observation_gap_s": -0.99,
+        "mean_continuity_ratio": 0.6,
+        "p5_continuity_ratio": 0.6,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 100.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": -0.04999999999999999,
+        "median_lead_time_s": -0.05,
+        "p95_lead_time_s": -0.05,
+        "mean_observation_gap_s": -0.9899999999999999,
+        "median_observation_gap_s": -0.99,
+        "mean_continuity_ratio": 0.9800000000000004,
+        "p5_continuity_ratio": 0.98,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.9899999999999999,
+        "median_observation_gap_s": -0.99,
+        "mean_continuity_ratio": 0.6,
+        "p5_continuity_ratio": 0.6,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 100.0
+      }
+    },
+    "S7_SIMILAR_ENTITIES": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": -0.88,
+        "median_observation_gap_s": -0.88,
+        "mean_continuity_ratio": 0.35999999999999993,
+        "p5_continuity_ratio": 0.36,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 100.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": -0.019999999999999997,
+        "median_lead_time_s": -0.02,
+        "p95_lead_time_s": -0.02,
+        "mean_observation_gap_s": -0.88,
+        "median_observation_gap_s": -0.88,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.746,
+        "median_lead_time_s": 0.73,
+        "p95_lead_time_s": 0.78,
+        "mean_observation_gap_s": -0.88,
+        "median_observation_gap_s": -0.88,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.134,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    },
+    "S8_MULTIPLE_ENTITIES": {
+      "B0_SINGLE_CAM": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B1_REACTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      },
+      "B2_PREDICTIVE": {
+        "trial_count": 100,
+        "mean_lead_time_s": 0.0,
+        "median_lead_time_s": 0.0,
+        "p95_lead_time_s": 0.0,
+        "mean_observation_gap_s": 0.0,
+        "median_observation_gap_s": 0.0,
+        "mean_continuity_ratio": 1.0,
+        "p5_continuity_ratio": 1.0,
+        "mean_handover_latency_s": 0.0,
+        "false_handover_rate_pct": 0.0,
+        "missed_handover_rate_pct": 0.0
+      }
+    }
+  }
+}

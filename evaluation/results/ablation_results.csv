@@ -1,0 +1,6 @@
+level_code,level_name,hazardous_selections_pct,false_safe_rate_pct,false_rejection_rate_pct,observation_loss_pct,stop_rate_pct,mean_latency_ms
+A_SAFETY_ONLY,Safety-Only Baseline,100.0,100.0,0.0,100.0,0.0,0.0903
+B_INSTANT_FOV,Safety + Instant FOV,100.0,100.0,0.0,100.0,0.0,0.1176
+C_INSTANT_FOV_BR,Safety + Instant FOV & Rate,100.0,100.0,0.0,100.0,0.0,0.1484
+D_SOFT_MC_PROP,Safety + Soft MC Prop (Un-gated),0.0,0.0,0.0,0.0,100.0,0.5398
+E_FULL_STAGE_A,Full Stage-A Admissibility Gate,0.0,0.0,0.0,0.0,100.0,0.5533

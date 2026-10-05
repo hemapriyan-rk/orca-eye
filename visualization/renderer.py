@@ -216,8 +216,11 @@ class Renderer:
 
         # --- 2. YOLO bounding boxes
         for obj in detection_result.objects:
-            x1 = int(obj.bbox[0] * sx); y1 = int(obj.bbox[1] * sy)
-            x2 = int(obj.bbox[2] * sx); y2 = int(obj.bbox[3] * sy)
+            box = getattr(obj, "bbox", getattr(obj, "box", None))
+            if box is None or len(box) < 4:
+                continue
+            x1 = int(box[0] * sx); y1 = int(box[1] * sy)
+            x2 = int(box[2] * sx); y2 = int(box[3] * sy)
             tid = getattr(obj, "track_id", None)
             is_conflict = tid in conflict_track_ids if tid is not None else False
             box_col = (0, 0, 255) if is_conflict else self.color_bbox
@@ -968,3 +971,791 @@ class Renderer:
                 self._tts_engine.runAndWait()
             except Exception as exc:
                 logger.warning("TTS speak error: %s", exc)
+
+    # =========================================================================
+    # STAGE B: DUAL-CAMERA MERGED DASHBOARD
+    # =========================================================================
+
+    def render_dual(
+        self,
+        frame0: np.ndarray,
+        frame1: np.ndarray,
+        detection_result0,
+        tracks0: List,
+        detection_result1,
+        tracks1: List,
+        entity_states: dict,
+        associations: List,
+        candidates: List,
+        decision,
+        corridor_support_records: dict,
+        fps: float = 0.0,
+        frame_id: int = 0,
+        latency_ms: float = 0.0,
+        freespace_result0: Optional[Any] = None,
+        freespace_result1: Optional[Any] = None,
+        spatial_map: Optional[Any] = None,
+        geometry_3d_result: Optional[Any] = None,
+        wall_proximity: Optional[dict] = None,
+    ) -> np.ndarray:
+        """
+        Renders the Stage B Dual-Camera Merged Dashboard:
+          Top: CAM0 (Primary Left, -17.5 deg) and CAM1 (Primary Right, +17.5 deg) feeds side-by-side
+               with free-space segmentation, automotive reversing corridor guidelines,
+               visual overlap seam shading, and cross-camera track association links.
+          Bottom-Left: Unified 2D Egocentric Occupancy Grid & Dual FOV Cones with path curves.
+          Bottom-Right: Stage B predictive handover telemetry, candidate corridor scoring table,
+                        and corridor admissibility status.
+        """
+        top_w = 675
+        top_h = 380
+
+        # 1. Render Camera 0 & Camera 1 panels
+        p_cam0 = self._panel_dual_feed(
+            frame0, detection_result0, tracks0,
+            camera_id="CAM0", title="CAM0: PRIMARY LEFT (Yaw -17.5 deg, FOV [-50 to +15 deg])",
+            overlap_side="right", target_w=top_w, target_h=top_h,
+            entity_states=entity_states,
+            freespace_result=freespace_result0,
+            candidates=candidates,
+            decision=decision,
+            wall_proximity=wall_proximity,
+            fps=fps,
+            frame_id=frame_id,
+            spatial_map=spatial_map,
+        )
+        p_cam1 = self._panel_dual_feed(
+            frame1, detection_result1, tracks1,
+            camera_id="CAM1", title="CAM1: PRIMARY RIGHT (Yaw +17.5 deg, FOV [-15 to +50 deg])",
+            overlap_side="left", target_w=top_w, target_h=top_h,
+            entity_states=entity_states,
+            freespace_result=freespace_result1,
+            candidates=candidates,
+            decision=decision,
+            wall_proximity=wall_proximity,
+            fps=fps,
+            frame_id=frame_id,
+            spatial_map=spatial_map,
+        )
+
+        # Center separator bar
+        sep = np.zeros((top_h, 10, 3), dtype=np.uint8)
+        sep[:] = (40, 40, 45)
+        top_composite = np.hstack([p_cam0, sep, p_cam1])
+
+        # Draw cross-camera association lines connecting matching boxes
+        self._draw_cross_camera_links(
+            top_composite, top_w, 10, tracks0, tracks1, associations, detection_result0, detection_result1
+        )
+
+        # 2. Render Bottom Panels
+        bot_bev_w = 580
+        bot_telem_w = 1360 - bot_bev_w
+        bot_h = 360
+
+        p_bev = self._panel_dual_bev(
+            entity_states=entity_states,
+            candidates=candidates,
+            decision=decision,
+            target_w=bot_bev_w,
+            target_h=bot_h,
+            spatial_map=spatial_map,
+        )
+        p_telem = self._panel_dual_telemetry(
+            entity_states=entity_states,
+            corridor_support_records=corridor_support_records,
+            decision=decision,
+            candidates=candidates,
+            wall_proximity=wall_proximity,
+            geometry_3d_result=geometry_3d_result,
+            fps=fps,
+            frame_id=frame_id,
+            latency_ms=latency_ms,
+            target_w=bot_telem_w,
+            target_h=bot_h,
+        )
+
+        bot_composite = np.hstack([p_bev, p_telem])
+
+        # Stack into full 1360x768 composite
+        composite = np.vstack([top_composite, bot_composite])
+        self._draw_disclaimer(composite)
+
+        if self.tts_enabled and decision and decision.command != self._last_tts_cmd:
+            self._speak(decision.command)
+            self._last_tts_cmd = decision.command
+
+        return composite
+
+    def _panel_dual_feed(
+        self,
+        frame: np.ndarray,
+        det_result,
+        tracks: List,
+        camera_id: str,
+        title: str,
+        overlap_side: str,
+        target_w: int,
+        target_h: int,
+        entity_states: dict,
+        freespace_result: Optional[Any] = None,
+        candidates: Optional[List] = None,
+        decision: Optional[Any] = None,
+        wall_proximity: Optional[dict] = None,
+        fps: float = 0.0,
+        frame_id: int = 0,
+        spatial_map: Optional[Any] = None,
+    ) -> np.ndarray:
+        p = cv2.resize(frame, (target_w, target_h))
+        orig_h, orig_w = frame.shape[:2]
+        sx = target_w / float(orig_w)
+        sy = target_h / float(orig_h)
+
+        # 1. Free-space colour overlay (translucent green on navigable floor)
+        if freespace_result is not None and self.show_freespace and hasattr(freespace_result, "label_map"):
+            lm = cv2.resize(
+                freespace_result.label_map,
+                (target_w, target_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            fs_overlay = np.zeros_like(p)
+            fs_overlay[lm == 0] = self.color_free      # FREE -> green
+            fs_overlay[lm == 1] = self.color_obstacle  # OBS -> red
+            cv2.addWeighted(fs_overlay, self.fs_alpha, p, 1.0 - self.fs_alpha, 0, p)
+
+        # 2. Draw subtle overlap seam zone
+        overlay = p.copy()
+        if overlap_side == "right":
+            # Right ~25% corresponds to [+17.5 deg, +32.5 deg]
+            x_start = int(target_w * 0.74)
+            cv2.rectangle(overlay, (x_start, 28), (target_w, target_h), (0, 180, 240), -1)
+            cv2.putText(p, "OVERLAP SEAM [+17.5 deg, +32.5 deg]", (x_start + 6, target_h - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 220, 255), 1, cv2.LINE_AA)
+            cv2.line(p, (x_start, 28), (x_start, target_h), (0, 200, 255), 1, cv2.LINE_AA)
+        else:
+            # Left ~25% corresponds to [-32.5 deg, -17.5 deg] local
+            x_end = int(target_w * 0.26)
+            cv2.rectangle(overlay, (0, 28), (x_end, target_h), (0, 180, 240), -1)
+            cv2.putText(p, "OVERLAP SEAM", (8, target_h - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 220, 255), 1, cv2.LINE_AA)
+            cv2.line(p, (x_end, 28), (x_end, target_h), (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.15, p, 0.85, 0, p)
+
+        # 3. Dynamic perspective corridor guidelines & Decision HUD on CAM0
+        if candidates and decision and camera_id == "CAM0":
+            self._draw_reversing_camera_guidelines(
+                p, spatial_map=spatial_map, candidates=candidates,
+                decision=decision, wall_proximity=wall_proximity
+            )
+            self._draw_dual_decision_hud(
+                p, decision=decision, fps=fps, frame_id=frame_id, wall_proximity=wall_proximity
+            )
+
+        # 4. Draw bounding boxes
+        if det_result and hasattr(det_result, "objects"):
+            for obj in det_result.objects:
+                box = getattr(obj, "bbox", getattr(obj, "box", None))
+                if box is None or len(box) < 4:
+                    continue
+                x1 = int(box[0] * sx)
+                y1 = int(box[1] * sy)
+                x2 = int(box[2] * sx)
+                y2 = int(box[3] * sy)
+
+                # Look up entity responsibility state if tracked
+                box_color = (0, 230, 0)
+                state_badge = ""
+                tid = getattr(obj, "track_id", None)
+                if tid is not None:
+                    for ent in entity_states.values():
+                        obs = ent.observations.get(camera_id)
+                        if obs and obs.track_id == tid:
+                            is_overlap = (
+                                "CAM0" in ent.observations and "CAM1" in ent.observations
+                                and getattr(ent.observations["CAM0"], "in_fov", False)
+                                and getattr(ent.observations["CAM1"], "in_fov", False)
+                            )
+                            if is_overlap:
+                                box_color = (0, 215, 255)  # Gold
+                                state_badge = " [REAL OVERLAP]"
+                            else:
+                                st = ent.responsibility_state
+                                if st == "PRE_ARM":
+                                    box_color = (0, 215, 255)
+                                    state_badge = " [PRE-ARM]"
+                                elif st == "TRANSFER":
+                                    box_color = (255, 50, 255)
+                                    state_badge = " [TRANSFER]"
+                                elif st == "SECONDARY" and camera_id == "CAM1":
+                                    box_color = (0, 255, 120)
+                                    state_badge = " [RESPONS]"
+                            break
+
+                cv2.rectangle(p, (x1, y1), (x2, y2), box_color, 2)
+                lbl = f"{obj.class_name}:{obj.confidence:.2f}{state_badge}"
+                cv2.rectangle(p, (x1, max(28, y1 - 20)), (x1 + len(lbl) * 8 + 6, max(48, y1)), (0, 0, 0), -1)
+                cv2.putText(p, lbl, (x1 + 4, max(42, y1 - 5)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+
+        # Title bar
+        cv2.rectangle(p, (0, 0), (target_w, 28), (20, 20, 25), -1)
+        cv2.putText(p, title, (10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 240), 1, cv2.LINE_AA)
+
+        # Draw Overlap zone indicator boundary on camera view
+        mid_x = int(target_w * 0.50)
+        if camera_id == "CAM0":
+            cv2.line(p, (mid_x, 28), (mid_x, target_h), (0, 180, 230), 1, cv2.LINE_AA)
+            cv2.putText(p, "CENTER OVERLAP ->", (target_w - 150, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 200, 255), 1, cv2.LINE_AA)
+        elif camera_id == "CAM1":
+            cv2.line(p, (mid_x, 28), (mid_x, target_h), (0, 180, 230), 1, cv2.LINE_AA)
+            cv2.putText(p, "<- CENTER OVERLAP", (target_w - 150, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 200, 255), 1, cv2.LINE_AA)
+
+        # Bottom Sub-banner (Camera FOV specs)
+        cv2.rectangle(p, (0, target_h - 22), (target_w, target_h), (15, 15, 20), -1)
+        if camera_id == "CAM0":
+            spec_txt = "CAM0 | PRIMARY LEFT | Yaw: -17.5 deg | FOV: [-50 deg, +15 deg]"
+            cv2.putText(p, spec_txt, (10, target_h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (220, 200, 0), 1)
+        else:
+            spec_txt = "CAM1 | PRIMARY RIGHT | Yaw: +17.5 deg | FOV: [-15 deg, +50 deg]"
+            cv2.putText(p, spec_txt, (10, target_h - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (200, 80, 200), 1)
+
+        return p
+
+    def _draw_dual_decision_hud(
+        self,
+        panel: np.ndarray,
+        decision,
+        fps: float = 0.0,
+        frame_id: int = 0,
+        wall_proximity: Optional[dict] = None,
+    ) -> None:
+        """Render navigation decision pill on top-left of CAM0 feed."""
+        if decision is None:
+            return
+
+        cmd = getattr(decision, "command", "STOP")
+        is_wall_coll = bool(wall_proximity and wall_proximity.get("is_frontal_collision"))
+        lat_warn = (wall_proximity.get("lateral_warning") if wall_proximity else None) or getattr(decision, "wall_warning", None)
+        has_wall_alert = is_wall_coll or bool(lat_warn)
+
+        hud_w = 235
+        hud_h = 76 if not has_wall_alert else 92
+        x1, y1 = 12, 34
+        x2, y2 = x1 + hud_w, y1 + hud_h
+
+        if cmd == "STOP" or is_wall_coll:
+            border_col = (0, 0, 240)    # Red
+            txt_col    = (50, 50, 255)
+            cmd_display = "STOP"
+        elif cmd == "CAUTION":
+            border_col = (0, 165, 255)  # Amber
+            txt_col    = (0, 200, 255)
+            cmd_display = "CAUTION"
+        elif cmd == "STRAIGHT":
+            border_col = (50, 220, 50)  # Green
+            txt_col    = (70, 255, 70)
+            cmd_display = "GO STRAIGHT"
+        elif cmd in ("SLIGHT_LEFT", "LEFT"):
+            border_col = (255, 180, 30)  # Cyan
+            txt_col    = (255, 210, 50)
+            cmd_display = "SLIGHT LEFT" if cmd == "SLIGHT_LEFT" else "TURN LEFT"
+        elif cmd in ("SLIGHT_RIGHT", "RIGHT"):
+            border_col = (255, 180, 30)  # Cyan
+            txt_col    = (255, 210, 50)
+            cmd_display = "SLIGHT RIGHT" if cmd == "SLIGHT_RIGHT" else "TURN RIGHT"
+        else:
+            border_col = (180, 180, 180)
+            txt_col    = (220, 220, 220)
+            cmd_display = cmd
+
+        overlay = panel.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (15, 15, 25), -1)
+        cv2.addWeighted(overlay, 0.85, panel, 0.15, 0, panel)
+
+        cv2.rectangle(panel, (x1, y1), (x2, y2), border_col, 2)
+        cv2.rectangle(panel, (x1 + 1, y1 + 1), (x2 - 1, y2 - 1), (0, 0, 0), 1)
+
+        # Line 1: Header + FPS
+        cv2.putText(panel, "NAVIGATION DECISION", (x1 + 8, y1 + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (160, 160, 190), 1, cv2.LINE_AA)
+        fps_text = f"{fps:.0f} FPS"
+        (fw, _), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.34, 1)
+        cv2.putText(panel, fps_text, (x2 - fw - 8, y1 + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (120, 220, 140), 1, cv2.LINE_AA)
+
+        # Line 2: Large Bold Command Display
+        cv2.putText(panel, cmd_display, (x1 + 8, y1 + 42),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.62, txt_col, 2, cv2.LINE_AA)
+
+        # Line 3: Clearance and Score metrics
+        clr_pct = int(getattr(decision, "clearance", 0.0) * 100)
+        score_val = getattr(decision, "score", 0.0)
+        metrics_text = f"Clearance: {clr_pct}% | Score: {score_val:.2f}"
+        cv2.putText(panel, metrics_text, (x1 + 8, y1 + 62),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (190, 190, 210), 1, cv2.LINE_AA)
+
+        # Line 4: Optional Wall alert
+        if is_wall_coll:
+            if getattr(decision, "decision", "") == "TURN":
+                alert_txt = f"STEERING AROUND HAZARD -> {cmd}"
+                cv2.putText(panel, alert_txt, (x1 + 8, y1 + 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.33, (0, 240, 255), 1, cv2.LINE_AA)
+            else:
+                alert_txt = "HAZARD: WALL COLLISION"
+                cv2.putText(panel, alert_txt, (x1 + 8, y1 + 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (50, 50, 255), 1, cv2.LINE_AA)
+        elif lat_warn:
+            alert_txt = f"WALL PROXIMITY: {lat_warn}"
+            cv2.putText(panel, alert_txt, (x1 + 8, y1 + 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 165, 255), 1, cv2.LINE_AA)
+
+    def _draw_cross_camera_links(
+        self,
+        top_composite: np.ndarray,
+        cam_w: int,
+        sep_w: int,
+        tracks0: List,
+        tracks1: List,
+        associations: List,
+        det0,
+        det1,
+    ) -> None:
+        """Draws association lines connecting corresponding objects across CAM0 and CAM1."""
+        if not associations:
+            return
+
+        for m in associations:
+            o0, o1, conf = m
+            if conf < 0.50:
+                continue
+
+            # Find matching bboxes
+            b0_center = None
+            b1_center = None
+
+            if det0 and hasattr(det0, "objects"):
+                for obj in det0.objects:
+                    if getattr(obj, "track_id", None) == o0.track_id:
+                        box0 = getattr(obj, "bbox", getattr(obj, "box", None))
+                        if box0 is not None and len(box0) >= 4:
+                            b0_center = (
+                                int(((box0[0] + box0[2]) / 2.0) * (cam_w / 640.0)),
+                                int(((box0[1] + box0[3]) / 2.0) * (380.0 / 480.0)),
+                            )
+                        break
+
+            if det1 and hasattr(det1, "objects"):
+                for obj in det1.objects:
+                    if getattr(obj, "track_id", None) == o1.track_id:
+                        box1 = getattr(obj, "bbox", getattr(obj, "box", None))
+                        if box1 is not None and len(box1) >= 4:
+                            b1_center = (
+                                cam_w + sep_w + int(((box1[0] + box1[2]) / 2.0) * (cam_w / 640.0)),
+                                int(((box1[1] + box1[3]) / 2.0) * (380.0 / 480.0)),
+                            )
+                        break
+
+            if b0_center and b1_center:
+                # Draw connecting line
+                cv2.line(top_composite, b0_center, b1_center, (0, 255, 255), 2, cv2.LINE_AA)
+                # Midpoint tag
+                mx = (b0_center[0] + b1_center[0]) // 2
+                my = (b0_center[1] + b1_center[1]) // 2
+                tag = f"MATCH A01: {conf*100:.0f}%"
+                cv2.rectangle(top_composite, (mx - 48, my - 12), (mx + 48, my + 10), (0, 0, 0), -1)
+                cv2.rectangle(top_composite, (mx - 48, my - 12), (mx + 48, my + 10), (0, 255, 255), 1)
+                cv2.putText(top_composite, tag, (mx - 44, my + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 255, 255), 1, cv2.LINE_AA)
+
+    def _panel_dual_bev(
+        self,
+        entity_states: dict,
+        candidates: List,
+        decision,
+        target_w: int,
+        target_h: int,
+        spatial_map: Optional[Any] = None,
+    ) -> np.ndarray:
+        p = np.full((target_h, target_w, 3), 15, dtype=np.uint8)
+
+        # Title bar
+        cv2.rectangle(p, (0, 0), (target_w, 28), (25, 25, 30), -1)
+        cv2.putText(p, "UNIFIED 2D SPATIAL MAP & DUAL FOV CONES", (10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 210, 230), 1, cv2.LINE_AA)
+        cv2.line(p, (0, 28), (target_w, 28), (60, 60, 70), 1)
+
+        ox = target_w // 2
+        oy = target_h - 25
+        scale = 55.0  # pixels per meter
+
+        # 1. Draw 2D Occupancy Grid cells from SpatialMap
+        if spatial_map is not None:
+            rows = spatial_map.rows
+            cols = spatial_map.cols
+            grid_layer = p.copy()
+
+            for r in range(rows):
+                y_m = ((rows - 1 - r) + 0.5) * (5.0 / float(rows))
+                cy_px = int(oy - y_m * scale)
+                hh = max(2, int(0.5 * (5.0 / float(rows)) * scale))
+
+                for c in range(cols):
+                    x_m = (c - (cols - 1) / 2.0) * (3.2 / float(cols))
+                    cx_px = int(ox + x_m * scale)
+                    hw = max(2, int(0.5 * (3.2 / float(cols)) * scale))
+
+                    cell = spatial_map.get_cell(r, c)
+                    if cell is None:
+                        continue
+                    fp = cell.free_prob
+                    occ = cell.occupancy
+                    unc = cell.uncertainty
+
+                    if occ > 0.35:
+                        c_col = (30, 30, int(min(255, occ * 200 + 55)))  # Red obstacle
+                    elif fp > 0.45:
+                        c_col = (20, int(min(255, fp * 190 + 50)), 35)   # Green free space
+                    else:
+                        c_col = (10, int(unc * 80), int(unc * 140))       # Amber uncertain
+
+                    x1, y1 = cx_px - hw, cy_px - hh
+                    x2, y2 = cx_px + hw, cy_px + hh
+                    cv2.rectangle(grid_layer, (x1, y1), (x2, y2), c_col, -1)
+                    cv2.rectangle(grid_layer, (x1, y1), (x2, y2), (35, 35, 45), 1)
+
+            cv2.addWeighted(grid_layer, 0.42, p, 0.58, 0, p)
+
+        # 2. Concentric distance arcs (1m to 5m)
+        for dist_m in range(1, 6):
+            r_px = int(dist_m * scale)
+            cv2.ellipse(p, (ox, oy), (r_px, r_px), 0, 180, 360, (50, 50, 65), 1)
+            cv2.putText(p, f"{dist_m}m", (ox + 4, oy - r_px + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (90, 90, 110), 1)
+
+        # 3. FOV Cones: Max distance 5.2m
+        max_r = int(5.2 * scale)
+
+        # CAM0: [-50.0 deg, +15.0 deg] (Cyan / Left Primary yaw = -17.5 deg)
+        ang_c0_l = math.radians(-50.0)
+        ang_c0_r = math.radians(+15.0)
+        pt_c0_l = (int(ox + max_r * math.sin(ang_c0_l)), int(oy - max_r * math.cos(ang_c0_l)))
+        pt_c0_r = (int(ox + max_r * math.sin(ang_c0_r)), int(oy - max_r * math.cos(ang_c0_r)))
+        cv2.line(p, (ox, oy), pt_c0_l, (220, 200, 0), 1, cv2.LINE_AA)
+        cv2.line(p, (ox, oy), pt_c0_r, (220, 200, 0), 1, cv2.LINE_AA)
+        cv2.putText(p, "CAM0 (-17.5 deg)", (pt_c0_l[0] - 25, pt_c0_l[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (220, 200, 0), 1)
+
+        # CAM1: [-15.0 deg, +50.0 deg] (Magenta / Right Primary yaw = +17.5 deg)
+        ang_c1_l = math.radians(-15.0)
+        ang_c1_r = math.radians(+50.0)
+        pt_c1_l = (int(ox + max_r * math.sin(ang_c1_l)), int(oy - max_r * math.cos(ang_c1_l)))
+        pt_c1_r = (int(ox + max_r * math.sin(ang_c1_r)), int(oy - max_r * math.cos(ang_c1_r)))
+        cv2.line(p, (ox, oy), pt_c1_l, (200, 80, 200), 1, cv2.LINE_AA)
+        cv2.line(p, (ox, oy), pt_c1_r, (200, 80, 200), 1, cv2.LINE_AA)
+        cv2.putText(p, "CAM1 (+17.5 deg)", (pt_c1_r[0] - 20, pt_c1_r[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (200, 80, 200), 1)
+
+        # Real Overlap Entities in center [-15 deg, +15 deg]
+        real_overlap_ents = [
+            ent for ent in entity_states.values()
+            if "CAM0" in ent.observations and "CAM1" in ent.observations
+            and getattr(ent.observations["CAM0"], "in_fov", False)
+            and getattr(ent.observations["CAM1"], "in_fov", False)
+        ]
+        num_overlap = len(real_overlap_ents)
+
+        # Dynamic Overlap Wedge: [-15.0 deg, +15.0 deg] centered at 0.0 deg
+        ov_poly = np.array([
+            (ox, oy),
+            pt_c1_l,
+            (int(ox + max_r * math.sin(0.0)), int(oy - max_r * math.cos(0.0))),
+            pt_c0_r,
+        ], dtype=np.int32)
+        ov_overlay = p.copy()
+        ov_col = (0, 200, 255) if num_overlap > 0 else (0, 140, 220)
+        ov_alpha = 0.28 if num_overlap > 0 else 0.14
+        cv2.fillConvexPoly(ov_overlay, ov_poly, ov_col)
+        cv2.addWeighted(ov_overlay, ov_alpha, p, 1.0 - ov_alpha, 0, p)
+
+        # Optical center forward axis (0 deg)
+        cv2.line(p, (ox, oy), (int(ox), int(oy - max_r)), (0, 220, 255), 1, cv2.LINE_AA)
+        ov_banner = f"REAL OVERLAP [-15..+15 deg]: {num_overlap} FUSED TARGETS" if num_overlap > 0 else "CENTER OVERLAP [-15..+15 deg]: 0 TARGETS"
+        cv2.putText(p, ov_banner, (ox - 95, oy - max_r - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 220, 255), 1)
+
+        # 4. Draw Candidate Path Trajectories
+        cmd_name = decision.command if decision else "STOP"
+        sel_dir = getattr(decision, "selected_path_direction", cmd_name)
+        rows = spatial_map.rows if spatial_map else 12
+        cols = spatial_map.cols if spatial_map else 20
+
+        if candidates:
+            # Pass 1: Draw unselected paths (cool slate grey)
+            for cand in candidates:
+                if cand.is_stop or not cand.points:
+                    continue
+                if cand.direction == sel_dir:
+                    continue
+                pts_screen = [(ox, oy)]
+                for r, c in cand.points:
+                    y_m = ((rows - 1 - r) + 0.5) * (5.0 / float(rows))
+                    x_m = (c - (cols - 1) / 2.0) * (3.2 / float(cols))
+                    pts_screen.append((int(ox + x_m * scale), int(oy - y_m * scale)))
+
+                if len(pts_screen) > 1:
+                    cv2.polylines(p, [np.array(pts_screen, dtype=np.int32)], False, (80, 80, 100), 1, cv2.LINE_AA)
+                    end_pt = pts_screen[-1]
+                    c3d = getattr(cand, "corridor_3d_clearance_m", 0.0)
+                    tag = f"{cand.direction[:2]} ({c3d:.1f}m)" if c3d > 0 else cand.direction[:2]
+                    cv2.putText(p, tag, (end_pt[0] - 14, end_pt[1] - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.28, (120, 120, 140), 1, cv2.LINE_AA)
+
+            # Pass 2: Draw selected path prominently
+            for cand in candidates:
+                if cand.direction != sel_dir or cand.is_stop or not cand.points:
+                    continue
+                pts_screen = [(ox, oy)]
+                for r, c in cand.points:
+                    y_m = ((rows - 1 - r) + 0.5) * (5.0 / float(rows))
+                    x_m = (c - (cols - 1) / 2.0) * (3.2 / float(cols))
+                    pts_screen.append((int(ox + x_m * scale), int(oy - y_m * scale)))
+
+                if len(pts_screen) > 1:
+                    path_col = (0, 240, 255) if decision and decision.decision == "TURN" else (0, 255, 120)
+                    cv2.polylines(p, [np.array(pts_screen, dtype=np.int32)], False, path_col, 3, cv2.LINE_AA)
+                    for pt in pts_screen[1:]:
+                        cv2.circle(p, pt, 3, (255, 255, 255), -1)
+                    end_pt = pts_screen[-1]
+                    c3d = getattr(cand, "corridor_3d_clearance_m", 0.0)
+                    tag = f"{cand.direction} ({c3d:.1f}m)" if c3d > 0 else cand.direction
+                    cv2.putText(p, tag, (end_pt[0] - 25, end_pt[1] - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.36, path_col, 1, cv2.LINE_AA)
+
+        # 5. Draw Wearer Reference Position
+        cv2.circle(p, (ox, oy), 7, (0, 255, 255), -1)
+        cv2.circle(p, (ox, oy), 11, (180, 180, 200), 1)
+        cv2.putText(p, "WEARER", (ox - 18, oy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0, 255, 255), 1)
+
+        # 6. Draw Tracked Multi-Camera Entities with Dynamic Real Overlap Sightlines
+        for ent in entity_states.values():
+            w_pos = None
+            for obs in ent.observations.values():
+                if obs and obs.in_fov and obs.world_pos:
+                    w_pos = obs.world_pos
+                    break
+
+            if w_pos is not None:
+                gx, gy = w_pos
+                ex = int(ox + gx * scale)
+                ey = int(oy - gy * scale)
+
+                is_real_overlap = (
+                    "CAM0" in ent.observations and "CAM1" in ent.observations
+                    and getattr(ent.observations["CAM0"], "in_fov", False)
+                    and getattr(ent.observations["CAM1"], "in_fov", False)
+                )
+
+                if is_real_overlap:
+                    # Draw converging dual-camera sightlines
+                    cv2.line(p, (ox - 15, oy), (ex, ey), (220, 200, 0), 1, cv2.LINE_AA)
+                    cv2.line(p, (ox + 15, oy), (ex, ey), (200, 80, 200), 1, cv2.LINE_AA)
+                    ecol = (0, 235, 255)  # Glowing Amber-Gold
+                    lbl = f"#{ent.global_entity_id} [REAL OVERLAP]"
+                else:
+                    st = ent.responsibility_state
+                    if st == "PRIMARY":
+                        ecol = (240, 160, 0)
+                    elif st == "PRE_ARM":
+                        ecol = (0, 215, 255)
+                    elif st == "TRANSFER":
+                        ecol = (255, 50, 255)
+                    else:
+                        ecol = (0, 255, 120)
+                    lbl = f"#{ent.global_entity_id} [{st}]"
+
+                cv2.circle(p, (ex, ey), 8, ecol, -1)
+                cv2.circle(p, (ex, ey), 10, (255, 255, 255), 1)
+                cv2.putText(p, lbl, (ex + 12, ey + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, ecol, 1, cv2.LINE_AA)
+
+        return p
+
+    def _panel_dual_telemetry(
+        self,
+        entity_states: dict,
+        corridor_support_records: dict,
+        decision,
+        candidates: Optional[List] = None,
+        wall_proximity: Optional[dict] = None,
+        geometry_3d_result: Optional[Any] = None,
+        fps: float = 0.0,
+        frame_id: int = 0,
+        latency_ms: float = 0.0,
+        target_w: int = 780,
+        target_h: int = 360,
+    ) -> np.ndarray:
+        p = np.full((target_h, target_w, 3), 18, dtype=np.uint8)
+
+        # Title bar
+        cv2.rectangle(p, (0, 0), (target_w, 28), (25, 25, 30), -1)
+        cv2.putText(p, "STAGE B: PREDICTIVE HANDOVER TELEMETRY & ADMISSIBILITY", (10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 210, 230), 1, cv2.LINE_AA)
+        cv2.line(p, (0, 28), (target_w, 28), (60, 60, 70), 1)
+
+        col_w = target_w // 2 - 10
+
+        # ── Left Column: Multi-Camera Responsibility & Geometry ──────
+        cv2.putText(p, "ENTITY RESPONSIBILITY CONTROLLER", (12, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.line(p, (12, 53), (col_w, 53), (50, 50, 60), 1)
+
+        y_ent = 70
+        displayed_ents = 0
+        for ent in list(entity_states.values())[:3]:
+            displayed_ents += 1
+            st = ent.responsibility_state
+            resp = ent.responsible_camera_id or "CAM0"
+
+            st_col = (0, 255, 120) if st == "SECONDARY" else ((255, 50, 255) if st == "TRANSFER" else ((0, 215, 255) if st == "PRE_ARM" else (240, 160, 0)))
+            cv2.rectangle(p, (12, y_ent - 14), (80, y_ent + 4), st_col, -1)
+            cv2.putText(p, st, (16, y_ent), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (0, 0, 0), 1, cv2.LINE_AA)
+
+            cv2.putText(p, f"Entity #{ent.global_entity_id} | Resp: {resp}", (88, y_ent),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (220, 220, 220), 1, cv2.LINE_AA)
+
+            # Observation rho bars
+            obs0 = ent.observations.get("CAM0")
+            obs1 = ent.observations.get("CAM1")
+            r0 = obs0.rho_fov if (obs0 and obs0.in_fov) else 0.0
+            r1 = obs1.rho_fov if (obs1 and obs1.in_fov) else 0.0
+
+            # CAM0 bar
+            y_bar = y_ent + 16
+            cv2.putText(p, f"CAM0 rho: {r0:.2f}", (20, y_bar), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (180, 180, 0), 1)
+            cv2.rectangle(p, (108, y_bar - 10), (108 + int(r0 * 95), y_bar - 2), (180, 180, 0), -1)
+            cv2.rectangle(p, (108, y_bar - 10), (203, y_bar - 2), (60, 60, 70), 1)
+
+            # CAM1 bar
+            y_bar2 = y_ent + 31
+            cv2.putText(p, f"CAM1 rho: {r1:.2f}", (20, y_bar2), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (200, 80, 200), 1)
+            cv2.rectangle(p, (108, y_bar2 - 10), (108 + int(r1 * 95), y_bar2 - 2), (200, 80, 200), -1)
+            cv2.rectangle(p, (108, y_bar2 - 10), (203, y_bar2 - 2), (60, 60, 70), 1)
+
+            # Association
+            assoc_txt = f"A01: {ent.association_confidence*100:.0f}%" if ent.association_confidence > 0 else "A01: --"
+            cv2.putText(p, assoc_txt, (218, y_bar), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (0, 220, 255), 1)
+
+            y_ent += 54
+
+        if displayed_ents == 0:
+            cv2.putText(p, "No critical entities in transition zone", (20, y_ent + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, (120, 120, 120), 1)
+            y_ent += 24
+
+        # Wall & 3D Egocentric Geometry Monitor
+        y_geo = max(y_ent + 10, 225)
+        cv2.putText(p, "WALL MONITOR & 3D POSE", (12, y_geo),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.line(p, (12, y_geo + 5), (col_w, y_geo + 5), (50, 50, 60), 1)
+
+        y_geo += 22
+        if wall_proximity:
+            lat_w = wall_proximity.get("lateral_warning")
+            front_coll = wall_proximity.get("is_frontal_collision", False)
+            min_free = wall_proximity.get("min_frontal_free", 1.0)
+            f3d = wall_proximity.get("frontal_clearance_3d_m")
+            f3d_str = f" | 3D: {f3d:.1f}m" if f3d is not None else ""
+            wall_str = f"Wall: Front Free {min_free*100:.0f}%{f3d_str}"
+            if front_coll:
+                wall_str += " | [HAZARD] COLLISION"
+                w_col = (50, 50, 255)
+            elif lat_w:
+                wall_str += f" | [CLOSE] {lat_w}"
+                w_col = (0, 165, 255)
+            else:
+                wall_str += " | CLEAR"
+                w_col = (100, 220, 100)
+            cv2.putText(p, wall_str, (16, y_geo), cv2.FONT_HERSHEY_SIMPLEX, 0.35, w_col, 1)
+
+        y_geo += 18
+        if geometry_3d_result is not None:
+            g_str = f"3D Pose: Floor ~{geometry_3d_result.floor_height_m:.1f}m | Pitch: {geometry_3d_result.pitch_deg:+.1f}d | Rec: {geometry_3d_result.best_direction}"
+            cv2.putText(p, g_str, (16, y_geo), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 210, 240), 1)
+
+        # ── Right Column: Candidate Corridor Ranking & Support Gate ───
+        right_x = col_w + 15
+        cv2.putText(p, "CANDIDATE CORRIDOR RANKING & SUPPORT GATE", (right_x, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.line(p, (right_x, 53), (target_w - 15, 53), (50, 50, 60), 1)
+
+        y_cor = 70
+        hdr_txt = f"{'DIR':12s} {'SCORE':5s} {'3D(m)':5s} {'CLEAR':5s} {'SUP_B':5s} {'STATUS'}"
+        cv2.putText(p, hdr_txt, (right_x, y_cor), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (160, 160, 180), 1)
+        y_cor += 18
+
+        cand_dict = {c.direction: c for c in candidates} if candidates else {}
+        sel_dir = getattr(decision, "selected_path_direction", (decision.command if decision else "STOP"))
+
+        for c_name in ["STRAIGHT", "SLIGHT_LEFT", "SLIGHT_RIGHT", "LEFT", "RIGHT", "STOP"]:
+            cand = cand_dict.get(c_name)
+            rec = corridor_support_records.get(c_name)
+            is_sel = (c_name == sel_dir)
+
+            score_val = cand.score if cand else (0.10 if c_name == "STOP" else 0.0)
+            clr_val = cand.clearance if cand else 0.0
+            c3d_val = getattr(cand, "corridor_3d_clearance_m", 0.0) if cand else 0.0
+            sup_val = rec.multi_cam_support if rec else 1.0
+            adm = rec.is_admissible if rec else True
+
+            if is_sel:
+                status = "BEST (SELECTED)"
+                row_col = (0, 255, 255)
+                prefix = "> "
+            elif c_name == "STOP":
+                status = "SAFE FALLBACK"
+                row_col = (130, 130, 150)
+                prefix = "  "
+            elif not adm:
+                status = "REJECTED (LOW RHO)"
+                row_col = (50, 50, 220)
+                prefix = "  "
+            elif clr_val < 0.20 or (cand and cand.risk > 0.35):
+                status = "BLOCKED (OBS)"
+                row_col = (70, 70, 220)
+                prefix = "  "
+            else:
+                status = "AVAILABLE"
+                row_col = (50, 220, 50)
+                prefix = "  "
+
+            row_str = f"{prefix}{c_name:10s} {score_val:5.2f} {c3d_val:4.1f}m {clr_val:5.2f} {sup_val:5.2f} {status}"
+            cv2.putText(p, row_str, (right_x, y_cor), cv2.FONT_HERSHEY_SIMPLEX, 0.35, row_col, 1, cv2.LINE_AA)
+            y_cor += 19
+
+        # ── Bottom Action & Performance Banner ────────────────────────
+        cv2.line(p, (15, target_h - 75), (target_w - 15, target_h - 75), (50, 50, 65), 1)
+
+        cmd = decision.command if decision else "STOP"
+        cmd_col = self._CMD_COLORS.get(cmd, (0, 255, 255))
+        cv2.rectangle(p, (15, target_h - 68), (220, target_h - 32), cmd_col, -1)
+        cv2.putText(p, f"CMD: {cmd}", (25, target_h - 44),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.62, (0, 0, 0), 2, cv2.LINE_AA)
+
+        # Subtitle metrics
+        clr_pct = int(getattr(decision, "clearance", 0.0) * 100)
+        dec_score = getattr(decision, "score", 0.0)
+        reason_txt = getattr(decision, "reason", "")
+        summary_str = f"Score: {dec_score:.2f} | Clr: {clr_pct}% | {reason_txt[:42]}"
+        cv2.putText(p, summary_str, (235, target_h - 52),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, (220, 220, 220), 1, cv2.LINE_AA)
+
+        perf_str = f"FPS: {fps:.1f} | Frame: {frame_id} | Pipeline: {latency_ms:.0f}ms | Mode: B2_PREDICTIVE"
+        cv2.putText(p, perf_str, (235, target_h - 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (170, 170, 190), 1, cv2.LINE_AA)
+
+        return p
+
+

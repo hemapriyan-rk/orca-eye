@@ -240,9 +240,23 @@ def run_pipeline(source, cfg: dict, evaluate: bool = False, max_frames: Optional
     renderer                = Renderer(cfg, W, H)
 
     # Stage A: Research Navigation-Coupled Perceptual Support
+    stage_a_cfg             = cfg.get("stage_a", {})
+    rho_cfg                 = stage_a_cfg.get("rho_fov", {})
+    safety_cfg              = cfg.get("safety", {})
     critical_extractor      = CriticalRegionExtractor(corridor_width_m=1.0, horizon_s=2.0, user_walk_speed_m_s=1.0)
-    rho_predictor           = RhoFOVPredictor(half_hfov_rad=camera_calib.half_hfov_rad, q_min=0.20, sigma_br=0.60, num_samples=50, horizon_s=2.0)
-    support_gate            = PerceptualSupportGate(tau_safe=0.35, tau_cam=0.40)
+    rho_predictor           = RhoFOVPredictor(
+        half_hfov_rad=camera_calib.half_hfov_rad,
+        q_min=float(rho_cfg.get("q_min", 0.20)),
+        sigma_br=float(rho_cfg.get("sigma_br", 0.60)),
+        num_samples=int(rho_cfg.get("num_samples", 200)),
+        horizon_s=float(rho_cfg.get("horizon_s", 2.0)),
+        dt_sample_s=float(rho_cfg.get("dt_sample_s", 0.20)),
+        use_soft_quality=bool(rho_cfg.get("use_soft_quality", True)),
+    )
+    support_gate            = PerceptualSupportGate(
+        tau_safe=float(safety_cfg.get("tau_safe", 0.35)),
+        tau_cam=float(safety_cfg.get("tau_cam", 0.40)),
+    )
     camera_manager          = CameraResponsibilityManager(primary_camera_id="PRIMARY_CAM")
     entity_kinematics_map   = {}  # track_id -> EntityKinematics
 
@@ -565,6 +579,434 @@ def run_benchmark(source, cfg: dict, n_frames: int = 100) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stage B: Dual-Camera Pipeline
+# ---------------------------------------------------------------------------
+
+def run_dual_pipeline(
+    source0,
+    source1,
+    cfg: dict,
+    evaluate: bool = False,
+    max_frames: Optional[int] = None,
+    save_snapshot: Optional[str] = None,
+    loop: bool = False,
+) -> None:
+    """
+    Executes the Dual-Primary Camera Navigation Pipeline:
+      CAM0: Left Primary camera (yaw -17.5 deg, FOV [-50 deg, +15 deg])
+      CAM1: Right Primary camera (yaw +17.5 deg, FOV [-15 deg, +50 deg])
+      Center Overlap: [-15 deg, +15 deg] centered at 0 deg (wearer heading)
+    """
+    from datetime import datetime
+    from perception.calibration import CameraCalibration
+    from perception.camera import CameraSource
+    from perception.depth import DepthEstimator
+    from perception.detector import YOLODetector
+    from perception.tracker import CentroidTracker
+    from perception.freespace import FreeSpaceEstimator
+    from perception.geometry_3d import Geometry3D
+    from navigation.spatial_map import SpatialMap
+    from navigation.path_generator import PathGenerator
+    from navigation.path_scorer import PathScorer
+    from navigation.decision import DecisionMaker
+    from navigation.spatial_entity import create_spatial_entities
+    from navigation.critical_region import CriticalRegionExtractor
+    from navigation.rho_fov import RhoFOVPredictor
+    from navigation.camera_observation import CameraModel, CameraObservation, MultiCameraEntityState
+    from navigation.camera_handover import PredictiveHandoverManager, HandoverMode, HandoverState
+    from navigation.multi_camera_support import MultiCameraSupportGate
+    from visualization.renderer import Renderer
+    from system_logging.logger import SystemLogger
+    from failure_analysis.detector import FailureDetector
+    from evaluation.metrics import MetricsCollector
+
+    logger.info("=" * 60)
+    logger.info("ORCA EYE — Dual-Primary Camera Navigation Pipeline")
+    logger.info("  CAM0 (Left Primary) : %s", source0)
+    logger.info("  CAM1 (Right Primary): %s", source1)
+    logger.info("  Center Overlap Zone : [-15.0 deg, +15.0 deg] at 0 deg")
+    logger.info("RESEARCH PROTOTYPE — NOT FOR REAL-WORLD MOBILITY USE")
+    logger.info("=" * 60)
+
+    cam_cfg0 = dict(cfg.get("camera", {}))
+    cam_cfg1 = dict(cfg.get("camera", {}))
+    if loop:
+        cam_cfg0["loop"] = True
+        cam_cfg1["loop"] = True
+
+    cam0 = CameraSource(source0, cam_cfg0)
+    cam1 = CameraSource(source1, cam_cfg1)
+    W0, H0 = cam0.get_resolution()
+    W1, H1 = cam1.get_resolution()
+    logger.info("CAM0 Resolution: %dx%d | CAM1 Resolution: %dx%d", W0, H0, W1, H1)
+
+    # Dual Primary Camera Symmetric Geometry
+    cam_model0 = CameraModel(camera_id="CAM0", yaw_deg=-17.5, half_hfov_rad=math.radians(32.5))
+    cam_model1 = CameraModel(camera_id="CAM1", yaw_deg=17.5, half_hfov_rad=math.radians(32.5))
+
+    camera_calib = CameraCalibration.from_fov(frame_width=W0, frame_height=H0, hfov_deg=65.0)
+    geometry_3d_engine = Geometry3D(camera_calib)
+
+    detector = YOLODetector(cfg.get("detection", {}))
+    tracker0 = CentroidTracker(cfg.get("tracking", {}))
+    tracker1 = CentroidTracker(cfg.get("tracking", {}))
+    depth_estimator = DepthEstimator(cfg.get("depth", {}))
+    fs_estimator = FreeSpaceEstimator(cfg.get("freespace", {}))
+    spatial_map = SpatialMap(cfg.get("spatial_map", {}), frame_width=W0, frame_height=H0)
+    path_generator = PathGenerator(cfg.get("path_generation", {}), spatial_map.rows, spatial_map.cols)
+    scorer = PathScorer(cfg.get("scoring", {}))
+
+    rho_cfg = cfg.get("stage_a", {}).get("rho_fov", {})
+    rho_predictor = RhoFOVPredictor(
+        sigma_br=float(rho_cfg.get("sigma_br", 0.60)),
+        num_samples=int(rho_cfg.get("num_samples", 200)),
+        horizon_s=float(rho_cfg.get("horizon_s", 2.0)),
+        dt_sample_s=float(rho_cfg.get("dt_sample_s", 0.20)),
+        use_soft_quality=bool(rho_cfg.get("use_soft_quality", True)),
+    )
+
+    ho_cfg = cfg.get("dual_camera", {}).get("handover", {})
+    handover_mgr = PredictiveHandoverManager(
+        primary_camera_id="CAM0",
+        secondary_camera_id="CAM1",
+        tau_release=float(ho_cfg.get("tau_release", 0.30)),
+        tau_acquire=float(ho_cfg.get("tau_acquire", 0.25)),
+        tau_assoc=float(ho_cfg.get("tau_assoc", 0.70)),
+        min_dwell_time_s=float(ho_cfg.get("min_dwell_time_s", 0.50)),
+        mode=HandoverMode.B2_PREDICTIVE,
+    )
+
+    safety_cfg = cfg.get("safety", {})
+    multi_support_gate = MultiCameraSupportGate(
+        tau_safe=float(safety_cfg.get("tau_safe", 0.35)),
+        tau_cam=float(safety_cfg.get("tau_cam", 0.40)),
+        primary_camera_id="CAM0",
+    )
+    critical_extractor = CriticalRegionExtractor()
+    decision_maker = DecisionMaker(safety_cfg)
+    renderer = Renderer(cfg, W0, H0)
+
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sys_logger = SystemLogger(cfg, session_id=session_id)
+    fail_detect = FailureDetector(cfg)
+    metrics = MetricsCollector(session_dir=sys_logger.get_session_dir()) if evaluate else None
+    fps_stats = _FPSStats(window=30)
+
+    entity_states: dict[int, MultiCameraEntityState] = {}
+    next_global_id = 1
+    cam0_track_map: dict[int, int] = {}  # track_id -> global_id
+    cam1_track_map: dict[int, int] = {}  # track_id -> global_id
+
+    frame_id = 0
+    depth_skip = int(cfg.get("depth", {}).get("skip_frames", 4))
+    _last_depth0 = None
+    _last_depth1 = None
+    _depth_frame_ctr = 0
+
+    composite = None
+    last_frame0 = None
+    last_frame1 = None
+    cam0_ended = False
+    cam1_ended = False
+
+    logger.info("Dual-Primary Pipeline running. Press 'q' to quit.")
+
+    try:
+        while True:
+            t0_frame = time.perf_counter()
+            ret0, frame0, _ = cam0.read()
+            ret1, frame1, _ = cam1.read()
+
+            if ret0 and frame0 is not None:
+                last_frame0 = frame0
+            else:
+                cam0_ended = True
+                frame0 = last_frame0
+
+            if ret1 and frame1 is not None:
+                last_frame1 = frame1
+            else:
+                cam1_ended = True
+                frame1 = last_frame1
+
+            # Play till both videos complete their full length
+            if (cam0_ended and cam1_ended) or frame0 is None or frame1 is None:
+                logger.info("Dual video stream reached end of playback for both cameras.")
+                break
+
+            frame_id += 1
+            if max_frames and frame_id > max_frames:
+                logger.info("Reached max frames (%d). Exiting dual loop.", max_frames)
+                break
+
+            now_ts = time.time()
+
+            # YOLO inference on both cameras
+            dr0 = detector.detect(frame0)
+            dr1 = detector.detect(frame1)
+
+            # Tracking on both cameras
+            tr0 = tracker0.update(dr0.objects, frame_id=frame_id)
+            tr1 = tracker1.update(dr1.objects, frame_id=frame_id)
+
+            for obj in dr0.objects:
+                for t in tr0:
+                    if abs(t.center[0] - obj.center[0]) < 15 and abs(t.center[1] - obj.center[1]) < 15:
+                        obj.track_id = t.track_id
+                        break
+
+            for obj in dr1.objects:
+                for t in tr1:
+                    if abs(t.center[0] - obj.center[0]) < 15 and abs(t.center[1] - obj.center[1]) < 15:
+                        obj.track_id = t.track_id
+                        break
+
+            # Build CameraObservation lists
+            obs0_list: list[CameraObservation] = []
+            obs1_list: list[CameraObservation] = []
+
+            hfov_tan = math.tan(cam_model0.half_hfov_rad)
+            f_px0 = (W0 / 2.0) / hfov_tan
+
+            for t in tr0:
+                ux = (t.center[0] - W0 / 2.0) / f_px0
+                b_loc = math.atan(ux)
+                w_b = cam_model0.local_to_world_bearing(b_loc)
+                tb = getattr(t, "bbox", getattr(t, "box", None))
+                box_h = max(30, tb[3] - tb[1]) if (tb and len(tb) >= 4) else 60
+                dist_m = max(0.8, min(6.0, 2.8 * (H0 / float(box_h))))
+                rate_rad_s = (t.velocity[0] / f_px0) * 30.0  # approximate px/frame to rad/s
+
+                pred0 = rho_predictor.predict_survival(
+                    entity_id=t.track_id,
+                    bearing_rad=b_loc,
+                    bearing_rate=rate_rad_s,
+                    camera_id="CAM0",
+                    current_time=now_ts,
+                )
+                obs0 = CameraObservation(
+                    camera_id="CAM0",
+                    track_id=t.track_id,
+                    timestamp=now_ts,
+                    local_bearing_rad=b_loc,
+                    local_bearing_deg=math.degrees(b_loc),
+                    local_bearing_rate_rad_s=rate_rad_s,
+                    world_bearing_rad=w_b,
+                    world_bearing_deg=math.degrees(w_b),
+                    distance_m=dist_m,
+                    world_pos=(dist_m * math.sin(w_b), dist_m * math.cos(w_b)),
+                    world_vel=(dist_m * rate_rad_s * math.cos(w_b), -dist_m * rate_rad_s * math.sin(w_b)),
+                    rho_fov=pred0.rho_fov,
+                    detection_confidence=0.90,
+                    class_name=getattr(t, "class_name", "obstacle"),
+                    in_fov=True,
+                )
+                obs0_list.append(obs0)
+
+            W1 = frame1.shape[1]
+            H1 = frame1.shape[0]
+            f_px1 = (W1 / 2.0) / hfov_tan
+
+            for t in tr1:
+                ux = (t.center[0] - W1 / 2.0) / f_px1
+                b_loc = math.atan(ux)
+                w_b = cam_model1.local_to_world_bearing(b_loc)
+                tb = getattr(t, "bbox", getattr(t, "box", None))
+                box_h = max(30, tb[3] - tb[1]) if (tb and len(tb) >= 4) else 60
+                dist_m = max(0.8, min(6.0, 2.8 * (H1 / float(box_h))))
+                rate_rad_s = (t.velocity[0] / f_px1) * 30.0
+
+                pred1 = rho_predictor.predict_survival(
+                    entity_id=t.track_id + 500,
+                    bearing_rad=b_loc,
+                    bearing_rate=rate_rad_s,
+                    camera_id="CAM1",
+                    current_time=now_ts,
+                )
+                obs1 = CameraObservation(
+                    camera_id="CAM1",
+                    track_id=t.track_id,
+                    timestamp=now_ts,
+                    local_bearing_rad=b_loc,
+                    local_bearing_deg=math.degrees(b_loc),
+                    local_bearing_rate_rad_s=rate_rad_s,
+                    world_bearing_rad=w_b,
+                    world_bearing_deg=math.degrees(w_b),
+                    distance_m=dist_m,
+                    world_pos=(dist_m * math.sin(w_b), dist_m * math.cos(w_b)),
+                    world_vel=(dist_m * rate_rad_s * math.cos(w_b), -dist_m * rate_rad_s * math.sin(w_b)),
+                    rho_fov=pred1.rho_fov,
+                    detection_confidence=0.88,
+                    class_name=getattr(t, "class_name", "obstacle"),
+                    in_fov=True,
+                )
+                obs1_list.append(obs1)
+
+            # Cross-camera association in overlap zone
+            matched = handover_mgr.associator.associate(obs0_list, obs1_list, now=now_ts)
+            matched_pairs = {m[0].track_id: (m[1].track_id, m[2]) for m in matched}
+
+            # Update global multi-camera entity mapping
+            for ent in entity_states.values():
+                ent.observations.clear()
+
+            for o0 in obs0_list:
+                t0_id = o0.track_id
+                if t0_id not in cam0_track_map:
+                    gid = next_global_id
+                    next_global_id += 1
+                    cam0_track_map[t0_id] = gid
+                    entity_states[gid] = MultiCameraEntityState(global_entity_id=gid, class_name=o0.class_name)
+                gid = cam0_track_map[t0_id]
+                entity_states[gid].observations["CAM0"] = o0
+
+                if t0_id in matched_pairs:
+                    t1_id, conf = matched_pairs[t0_id]
+                    cam1_track_map[t1_id] = gid
+
+            for o1 in obs1_list:
+                t1_id = o1.track_id
+                if t1_id in cam1_track_map:
+                    gid = cam1_track_map[t1_id]
+                else:
+                    gid = next_global_id
+                    next_global_id += 1
+                    cam1_track_map[t1_id] = gid
+                    entity_states[gid] = MultiCameraEntityState(global_entity_id=gid, class_name=o1.class_name)
+                entity_states[gid].observations["CAM1"] = o1
+
+            # Update Handover state machine for each entity
+            for gid, ent in entity_states.items():
+                c_conf = 0.0
+                obs0 = ent.observations.get("CAM0")
+                if obs0 and obs0.track_id in matched_pairs:
+                    c_conf = matched_pairs[obs0.track_id][1]
+                handover_mgr.update_entity_handover(ent, association_confidence=c_conf, current_time=now_ts)
+
+            # Depth & Freespace on both Primary Cameras (CAM0 Left, CAM1 Right)
+            _depth_frame_ctr += 1
+            if _depth_frame_ctr % depth_skip == 0 or _last_depth0 is None:
+                dpr0 = depth_estimator.estimate(frame0)
+                _last_depth0 = dpr0
+            else:
+                dpr0 = _last_depth0
+
+            if _depth_frame_ctr % depth_skip == 0 or _last_depth1 is None:
+                dpr1 = depth_estimator.estimate(frame1)
+                _last_depth1 = dpr1
+            else:
+                dpr1 = _last_depth1
+
+            fs0 = fs_estimator.estimate(frame0, dpr0, dr0.objects)
+            fs1 = fs_estimator.estimate(frame1, dpr1, dr1.objects)
+
+            # Unified spatial map updating from both primary cameras
+            spatial_map.update_dual(
+                freespace_result0=fs0,
+                depth_result0=dpr0,
+                tracks0=tr0,
+                freespace_result1=fs1,
+                depth_result1=dpr1,
+                tracks1=tr1,
+            )
+            geom_3d = geometry_3d_engine.analyze(dpr0.depth_map, dr0.objects) if (dpr0 and dpr0.is_valid and dpr0.depth_map is not None) else None
+            wall_proximity = spatial_map.evaluate_wall_proximity(geometry_3d_result=geom_3d)
+            candidates = path_generator.generate(spatial_map, geometry_3d_result=geom_3d)
+            candidates = scorer.score(candidates)
+
+            # Unified Spatial Entities & Critical Regions across both Primary cameras
+            se0 = create_spatial_entities(
+                tracks=tr0,
+                depth_map=dpr0.depth_normalized if dpr0 else None,
+                depth_estimator=depth_estimator,
+                frame_w=W0,
+                frame_h=H0,
+            )
+            for e in se0:
+                e.relative_bearing -= 17.5  # shift from CAM0 optical axis to wearer center
+
+            se1 = create_spatial_entities(
+                tracks=tr1,
+                depth_map=dpr1.depth_normalized if dpr1 else None,
+                depth_estimator=depth_estimator,
+                frame_w=W1,
+                frame_h=H1,
+            )
+            for e in se1:
+                e.relative_bearing += 17.5  # shift from CAM1 optical axis to wearer center
+
+            spatial_entities = se0 + se1
+            critical_regions = critical_extractor.extract_critical_regions(
+                candidates=candidates,
+                spatial_entities=spatial_entities,
+            )
+
+            # Stage B Multi-Camera Corridor Support Gate
+            corridor_support = multi_support_gate.evaluate_corridors(
+                candidates=candidates,
+                critical_regions=critical_regions,
+                entities=entity_states,
+                use_multi_cam=True,
+            )
+            legacy_support = {k: v.to_legacy_corridor_support_record() for k, v in corridor_support.items()}
+
+            decision = decision_maker.decide(
+                candidates=candidates,
+                frame_id=frame_id,
+                spatial_entities=spatial_entities,
+                wall_proximity=wall_proximity,
+                corridor_support=legacy_support,
+                primary_camera_id="CAM0",
+            )
+
+            fps = fps_stats.tick()
+            total_ms = (time.perf_counter() - t0_frame) * 1000.0
+
+            # Render Merged Dual Dashboard
+            composite = renderer.render_dual(
+                frame0=frame0,
+                frame1=frame1,
+                detection_result0=dr0,
+                tracks0=tr0,
+                detection_result1=dr1,
+                tracks1=tr1,
+                entity_states=entity_states,
+                associations=matched,
+                candidates=candidates,
+                decision=decision,
+                corridor_support_records=corridor_support,
+                fps=fps,
+                frame_id=frame_id,
+                latency_ms=total_ms,
+                freespace_result0=fs0,
+                freespace_result1=fs1,
+                spatial_map=spatial_map,
+                geometry_3d_result=geom_3d,
+                wall_proximity=wall_proximity,
+            )
+
+            if save_snapshot and frame_id == 25:
+                cv2.imwrite(save_snapshot, composite)
+                logger.info("Saved snapshot to %s", save_snapshot)
+
+            key = renderer.show(composite)
+            if key == ord("q"):
+                logger.info("User quit.")
+                break
+
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt in dual pipeline.")
+    finally:
+        cam0.release()
+        cam1.release()
+        renderer.destroy()
+        if save_snapshot and not Path(save_snapshot).exists() and composite is not None:
+            cv2.imwrite(save_snapshot, composite)
+            logger.info("Saved exit snapshot to %s", save_snapshot)
+        logger.info("Dual pipeline complete. Processed %d frames.", frame_id)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -574,16 +1016,24 @@ def parse_args():
                     "RESEARCH PROTOTYPE — NOT FOR REAL-WORLD MOBILITY USE",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--source",     default=None,
-                   help="int webcam index or URL/path to video.")
-    p.add_argument("--config",     default="config.yaml")
-    p.add_argument("--evaluate",   action="store_true",
+    p.add_argument("--source", default=None,
+                   help="int webcam index or URL/path to single-camera video.")
+    p.add_argument("--dual-sources", nargs=2, default=None, metavar=("CAM0", "CAM1"),
+                   help="Paths to CAM0 and CAM1 video files for Stage B dual-camera pipeline.")
+    p.add_argument("--dual", action="store_true",
+                   help="Run Stage B dual-camera pipeline using config.yaml sources.")
+    p.add_argument("--save-snapshot", default=None,
+                   help="Save diagnostic frame snapshot to this path.")
+    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--evaluate", action="store_true",
                    help="Enable full metrics report.")
-    p.add_argument("--benchmark",  action="store_true",
+    p.add_argument("--benchmark", action="store_true",
                    help="Measure per-stage GPU latency and exit.")
     p.add_argument("--list-scenarios", action="store_true")
     p.add_argument("--max-frames", type=int, default=None,
                    help="Maximum number of frames to run before exiting.")
+    p.add_argument("--loop", "-l", action="store_true",
+                   help="Continuously loop video playback when playing video files.")
     return p.parse_args()
 
 
@@ -598,6 +1048,27 @@ def main():
     cfg = load_config(args.config)
     setup_gpu(cfg)
 
+    # 1. Dual-camera mode
+    if args.dual_sources or args.dual:
+        if args.dual_sources:
+            src0, src1 = args.dual_sources
+        else:
+            dual_cfg = cfg.get("dual_camera", {})
+            src0 = dual_cfg.get("cam0", {}).get("source", r"D:\orca\videos\Dual\LEFT CAMERA.mp4")
+            src1 = dual_cfg.get("cam1", {}).get("source", r"D:\orca\videos\Dual\RIGHT CAMERA.mp4")
+
+        run_dual_pipeline(
+            source0=src0,
+            source1=src1,
+            cfg=cfg,
+            evaluate=args.evaluate,
+            max_frames=args.max_frames,
+            save_snapshot=args.save_snapshot,
+            loop=args.loop,
+        )
+        return
+
+    # 2. Single-camera mode
     default_test_video = Path(r"D:\orca\videos\WhatsApp Video 2026-09-16 at 7.37.26 PM.mp4")
     if args.source is not None:
         source = args.source
@@ -622,3 +1093,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

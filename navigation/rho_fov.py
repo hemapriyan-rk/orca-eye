@@ -57,9 +57,11 @@ class RhoFOVPredictor:
         half_hfov_rad: float = math.radians(32.5),  # 65 deg full HFOV default
         q_min: float = 0.20,
         sigma_br: float = 0.60,
-        num_samples: int = 50,
+        num_samples: int = 200,                     # Upgraded from 50 to 200 for tail stability (std error ~3.4%)
         horizon_s: float = 2.0,
         dt_sample_s: float = 0.20,
+        use_soft_quality: bool = True,              # True: continuous soft q_BR weighting; False: binary step
+        seed: Optional[int] = None,                 # Deterministic seed for reproducible evaluation
     ) -> None:
         self.half_hfov_rad = half_hfov_rad
         self.q_min = q_min
@@ -67,6 +69,8 @@ class RhoFOVPredictor:
         self.num_samples = num_samples
         self.horizon_s = horizon_s
         self.dt_sample_s = dt_sample_s
+        self.use_soft_quality = use_soft_quality
+        self.rng = np.random.default_rng(seed)
 
         # Prediction evaluation buffer: stores predictions awaiting ground truth validation
         self.prediction_buffer: List[RhoFOVPrediction] = []
@@ -95,9 +99,11 @@ class RhoFOVPredictor:
         sigma_phi_dot: float = 0.15,   # bearing rate standard deviation (rad/s)
         camera_id: str = "PRIMARY",
         current_time: Optional[float] = None,
+        rng: Optional[np.random.Generator] = None,
     ) -> RhoFOVPrediction:
         """
         Estimate continuous survival probability rho_FOV using vectorized Monte Carlo.
+        When use_soft_quality=True, integrates continuous Gaussian tracking quality q_BR(phi_dot).
         """
         now = time.time() if current_time is None else current_time
         init_valid = self.compute_instantaneous_validity(bearing_rad, bearing_rate)
@@ -120,9 +126,10 @@ class RhoFOVPredictor:
             return pred
 
         # Vectorized Monte Carlo perturbation sampling
-        # Sample N perturbations for initial bearing and bearing rate
-        phi_0_samples = np.random.normal(bearing_rad, sigma_phi, size=self.num_samples)
-        phi_dot_samples = np.random.normal(bearing_rate, sigma_phi_dot, size=self.num_samples)
+        # Sample N perturbations for initial bearing and bearing rate using deterministic generator
+        active_rng = self.rng if rng is None else rng
+        phi_0_samples = active_rng.normal(bearing_rad, sigma_phi, size=self.num_samples)
+        phi_dot_samples = active_rng.normal(bearing_rate, sigma_phi_dot, size=self.num_samples)
 
         # Discrete evaluation time steps tau in [dt, 2*dt, ..., H]
         time_steps = np.arange(self.dt_sample_s, self.horizon_s + 1e-4, self.dt_sample_s)
@@ -136,20 +143,25 @@ class RhoFOVPredictor:
         phi_dot_traj = np.repeat(phi_dot_samples[np.newaxis, :], num_steps, axis=0)
 
         # Evaluate FOV boundary condition: |phi(tau)| <= theta_c
-        fov_valid = np.abs(phi_traj) <= self.half_hfov_rad
+        fov_valid = (np.abs(phi_traj) <= self.half_hfov_rad).astype(np.float64)
 
-        # Evaluate Tracking Quality condition: q_BR(|phi_dot|) >= q_min
-        # q = exp(- phi_dot^2 / (2 * sigma_br^2)) >= q_min <=> |phi_dot| <= sqrt(-2 * sigma_br^2 * ln(q_min))
-        max_allowed_phi_dot = math.sqrt(-2.0 * (self.sigma_br ** 2) * math.log(max(self.q_min, 1e-5)))
-        quality_valid = np.abs(phi_dot_traj) <= max_allowed_phi_dot
-
-        # Joint validity matrix: (num_steps, num_samples)
-        joint_valid = fov_valid & quality_valid
-
-        # Continuous survival requires joint_valid == True across ALL time steps in the horizon
-        survived_mask = np.all(joint_valid, axis=0)  # (num_samples,)
-        survived_count = int(np.sum(survived_mask))
-        rho_fov = float(survived_count) / float(self.num_samples)
+        if self.use_soft_quality:
+            # Continuous Gaussian tracking quality q_BR(phi_dot) in (0, 1]
+            q_traj = np.exp(- (phi_dot_traj ** 2) / (2.0 * (self.sigma_br ** 2)))
+            # Joint continuous observation quality along each sample trajectory
+            joint_traj = fov_valid * q_traj
+            # Continuous cumulative survival product over horizon H
+            sample_weights = np.prod(joint_traj, axis=0)  # (num_samples,)
+            rho_fov = float(np.mean(sample_weights))
+            survived_count = int(np.sum(sample_weights >= self.q_min))
+        else:
+            # Binary step thresholding: q_BR >= q_min
+            max_allowed_phi_dot = math.sqrt(-2.0 * (self.sigma_br ** 2) * math.log(max(self.q_min, 1e-5)))
+            quality_valid = (np.abs(phi_dot_traj) <= max_allowed_phi_dot).astype(np.float64)
+            joint_valid = (fov_valid > 0.5) & (quality_valid > 0.5)
+            survived_mask = np.all(joint_valid, axis=0)  # (num_samples,)
+            survived_count = int(np.sum(survived_mask))
+            rho_fov = float(survived_count) / float(self.num_samples)
 
         pred = RhoFOVPrediction(
             camera_id=camera_id,

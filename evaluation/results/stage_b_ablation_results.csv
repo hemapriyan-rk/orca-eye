@@ -1,0 +1,6 @@
+level_code,level_name,mean_lead_time_s,mean_observation_gap_s,observation_continuity_pct,false_handover_rate_pct,corridor_preservation_pct,mean_latency_ms
+A_SINGLE_CAM_REACTIVE,Reactive Single Cam,0.0,0.0,70.5,0.0,0.0,63.9581
+B_TWO_CAM_REACTIVE,Two-Cam Reactive,-0.2159,0.0,100.0,0.0,0.0,18.7715
+C_PRED_NO_ASSOC,Predictive (No Assoc),0.5375,0.0,100.0,0.0,0.0,19.848
+D_PRED_WITH_ASSOC,Predictive + Assoc,0.5375,0.0,100.0,0.0,100.0,19.8939
+E_FULL_STAGE_B,Full Stage-B Multi-Cam,0.5375,0.0,100.0,0.0,100.0,19.4528
